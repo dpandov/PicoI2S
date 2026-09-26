@@ -24,12 +24,10 @@ compile_commands.json
 .ninja_log
 
 # IDE / editor
+# Generated per machine by the Raspberry Pi Pico extension ("Import Project");
+# only the extension recommendation is shared.
 .vscode/*
-!.vscode/settings.json
-!.vscode/launch.json
-!.vscode/tasks.json
 !.vscode/extensions.json
-!.vscode/c_cpp_properties.json
 .idea/
 *.swp
 *~

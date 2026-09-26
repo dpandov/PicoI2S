@@ -1,0 +1,64 @@
+// TinyUSB configuration.
+#pragma once
+
+#include "usb/usb_descriptors.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#ifndef CFG_TUSB_MCU
+#error CFG_TUSB_MCU must be defined (the Pico SDK does this)
+#endif
+
+#ifndef CFG_TUSB_OS
+#define CFG_TUSB_OS             OPT_OS_PICO
+#endif
+
+// Debug output disturbs isochronous timing.
+#ifndef CFG_TUSB_DEBUG
+#define CFG_TUSB_DEBUG          0
+#endif
+
+#define CFG_TUD_ENABLED         1
+#define CFG_TUD_MAX_SPEED       OPT_MODE_FULL_SPEED
+
+#ifndef CFG_TUSB_MEM_SECTION
+#define CFG_TUSB_MEM_SECTION
+#endif
+#ifndef CFG_TUSB_MEM_ALIGN
+#define CFG_TUSB_MEM_ALIGN      __attribute__((aligned(4)))
+#endif
+
+#define CFG_TUD_ENDPOINT0_SIZE  64
+
+#define CFG_TUD_AUDIO           1
+#define CFG_TUD_CDC             0
+#define CFG_TUD_MSC             0
+#define CFG_TUD_HID             0
+#define CFG_TUD_MIDI            0
+#define CFG_TUD_VENDOR          0   // the reset interface is an app driver
+
+//--------------------------------------------------------------------+
+// Audio class
+//--------------------------------------------------------------------+
+
+#define CFG_TUD_AUDIO_FUNC_1_DESC_LEN       USB2SPDIF_AUDIO_DESC_LEN
+#define CFG_TUD_AUDIO_FUNC_1_N_AS_INT       1
+#define CFG_TUD_AUDIO_FUNC_1_CTRL_BUF_SZ    64
+
+// Sized for the largest alt setting: 96 kHz, 4-byte subslots, stereo.
+#define CFG_TUD_AUDIO_ENABLE_EP_OUT         1
+#define CFG_TUD_AUDIO_FUNC_1_EP_OUT_SZ_MAX  TUD_AUDIO_EP_SIZE(AUDIO_MAX_SAMPLE_RATE, AUDIO_24BIT_SUBSLOT, AUDIO_N_CHANNELS)
+
+// 8 max-size packets. Feedback holds it half full: 4 ms at 96 kHz / 24-bit,
+// 16 ms at 48 kHz / 16-bit. Must be a multiple of both frame sizes (4, 8).
+#define CFG_TUD_AUDIO_FUNC_1_EP_OUT_SW_BUF_SZ (8 * CFG_TUD_AUDIO_FUNC_1_EP_OUT_SZ_MAX)
+
+#define CFG_TUD_AUDIO_ENABLE_FEEDBACK_EP    1
+// Overridden per host by tud_audio_feedback_format_correction_cb().
+#define CFG_TUD_AUDIO_ENABLE_FEEDBACK_FORMAT_CORRECTION 0
+
+#ifdef __cplusplus
+}
+#endif

@@ -15,10 +15,16 @@ Full design and hardware notes are in `README.md`; read it first. Key points:
 - The system PLL is switched per sample-rate family so the PIO divider is an
   integer (see the table in `README.md`). Keep the UART on the 48 MHz USB PLL
   so logging survives a clock switch.
-- When streaming stops, keep transmitting silence so the receiver stays locked.
+- Functional requirement (implement in step 3): when audio stops (host
+  closes the stream or stops sending samples), transmit S/PDIF silence for
+  3 seconds, then stop the S/PDIF output entirely (line idle, no carrier).
+  Restart on the next stream. "Audio" = stream open with samples arriving;
+  digital silence inside an open stream is still audio.
+- LED (GPIO 25): on while audio is playing, off otherwise, plus two short
+  flashes on enumeration (two). No other blink patterns.
 - Pins: S/PDIF data on GPIO 28 (`SPDIF_PIN`), chosen for proximity to 3V3
-  and GND. The onboard LED (GPIO 25) is reserved as the LOCK indicator; do
-  not use it for anything else. UART0 on GPIO 0/1 is the console.
+  and GND. The onboard LED (GPIO 25) is reserved as the audio/LOCK
+  indicator; do not use it for anything else. UART0 on GPIO 0/1 is the console.
 
 ## Toolchain
 
@@ -26,9 +32,23 @@ Full design and hardware notes are in `README.md`; read it first. Key points:
   Installed via the Raspberry Pi Pico VS Code extension into `~/.pico-sdk`.
 - Board: `PICO_BOARD=pico2`. ARM cores (not RISC-V). Language: C.
 - Build: `cmake -S . -B build -G Ninja -DPICO_BOARD=pico2 && cmake --build build`
-- Debug/flash: Raspberry Pi Debug Probe via OpenOCD, or BOOTSEL + picotool.
-  The Pico's USB port is the audio device, so console output goes to UART0
-  (GPIO0/1), not USB CDC.
+  (`build/` is the directory the VS Code extension uses; Claude's own
+  verification builds go in `scratch/`).
+- Command-line builds outside the VS Code terminal need the extension's
+  tools on PATH. Versions are pinned at the top of `CMakeLists.txt`. In
+  Git Bash:
+  `P=~/.pico-sdk; export PICO_SDK_PATH=$P/sdk/<ver> PICO_TOOLCHAIN_PATH=$P/toolchain/<ver> PATH=$P/toolchain/<ver>/bin:$P/picotool/<ver>/picotool:$P/cmake/<ver>/bin:$P/ninja/<ver>:$PATH`
+- Flash without BOOTSEL (firmware has the picotool reset interface):
+  `picotool load -x <uf2> -f --vid 0x1209 --pid 0x0001`. picotool lives in
+  `~/.pico-sdk/picotool/<ver>/picotool/`. BOOTSEL is only needed if the
+  firmware is hung with the watchdog disabled, or after flashing other code.
+- The Pico's USB port is the audio device, so console output goes to UART0
+  (GPIO0/1, 921600 baud), not USB CDC. No debug probe or UART adapter is
+  connected yet: use the diagnostic string instead (`tools/diag.py`, see
+  `src/diag/diag.h`). It reports panics, hard faults and main-loop hangs from the
+  previous boot plus live stream status.
+- Windows test tooling: `tools/stream_test.py` (WASAPI exclusive sweep with
+  device-side verification). Keep its Python venv in `scratch/venv`.
 
 ## Scratch folder rule
 
@@ -46,26 +66,63 @@ generated analysis go in `scratch/` at the repository root. This folder and
 
 ## Conventions
 
-- Source in `src/`, PIO programs in `src/pio/`, host-side helper scripts in
-  `tools/`.
-- Keep USB descriptors, S/PDIF framing, and clock management in separate
-  modules. Do not mix TinyUSB callbacks with PIO/DMA code.
+- Source layout, one folder per subsystem:
+  - `src/main.c`: init and main loop only. `src/board_config.h`: pins.
+  - `src/usb/`: descriptors, UAC2 class callbacks, `tusb_config.h`. All
+    `tud_*` callbacks live here.
+  - `src/app/`: application behaviour (audio sink / pipeline, status LED,
+    console and diagnostic status line).
+  - `src/diag/`: crash and hang diagnostics.
+  - `src/spdif/`: S/PDIF transmitter (PIO program, DMA, subframe builder).
+  - `src/clock/`: sample-rate-family PLL switching.
+  - `tools/`: host-side scripts.
+- Includes are relative to `src/` (`#include "usb/usb_audio.h"`).
+- Do not mix TinyUSB callbacks with PIO/DMA code.
 - Prefer integer arithmetic in the audio path. No floating point in
   interrupt handlers.
-- Comment every S/PDIF channel-status bit and every PLL value with the reason
-  it is set, not just the value.
+- Comments: concise and to the point. Comment only where the code does not
+  speak for itself, or where something is important or ambiguous (e.g. the
+  reason for a PLL value or a channel-status bit). No planning, development
+  stage or history notes in code; those belong in commits and this file.
 - Commit messages: short imperative subject, body explaining why.
 
 ## Development plan
 
-1. Toolchain install, CMake skeleton, blink, UART logging.
+1. Toolchain install, CMake skeleton, blink, UART logging. (done)
 2. UAC2 descriptors from the TinyUSB `uac2_speaker_fb` example. Goal: device
-   enumerates on Windows and Linux with the right rates and formats.
+   enumerates on Windows and Linux with the right rates and formats. (done on
+   Windows; Linux not yet tested)
 3. S/PDIF PIO program plus DMA double buffer, first with a generated test
-   tone at 48 kHz. Verify lock on a real receiver.
+   tone at 48 kHz. Verify lock on a real receiver. Includes the 3-second
+   silence-then-stop behaviour when audio stops.
 4. Connect USB FIFO to subframe builder. Feedback via FIFO fill level.
 5. Sample-rate and format switching, PLL family switch, channel status.
-6. Silence on stop, robustness (underrun / overrun), long-run soak test.
+6. Robustness (underrun / overrun), long-run soak test.
+
+## Known TinyUSB issues (0.18, SDK 2.3.1)
+
+- On RP2040/RP2350 `usbd_edpt_close()` is a no-op for ISO endpoints, so a
+  closed stream leaves its OUT endpoint armed and the next stream open
+  panics ("ep 01 was already available"). `usb_audio.c` disarms the
+  endpoints in `tud_audio_set_itf_close_EP_cb()`. Keep that workaround.
+- Feedback parameters are only read at SET_INTERFACE, not on a sample-rate
+  change while streaming.
+- The feedback clamp is whole samples per ms: floor((fs-1)/1000) to
+  fs/1000+1. For the 44.1 kHz family that allows only -0.23 % below nominal
+  (44.0 of 44.1), so the S/PDIF clock may run slow by at most ~2000 ppm.
+  The planned PLL error (-344 ppm) is inside that.
+
+## Host compatibility
+
+- Full Speed feedback format differs per OS: Windows requires a 4-byte EP
+  with 16.16 (Code 10 with 3 bytes); Apple requires 3 bytes, 10.14.
+  `usb_descriptors.c` detects Apple hosts (string request before config
+  request after the device descriptor) and serves a second configuration;
+  `tud_audio_feedback_format_correction_cb()` switches the value format.
+  The diagnostic string shows the guess (`a` / `o`).
+- To prove a host follows the feedback, temporarily make the sink consume
+  a few thousand ppm fast or slow in a scratch build: the FIFO must stay
+  stable with no underruns. Do not commit such test code.
 
 ## Git rules
 

@@ -43,13 +43,18 @@ you; check the datasheet drawing in case of doubt.
 
 ### Status LED
 
-The onboard LED (GPIO 25) is the LOCK indicator:
+The onboard LED (GPIO 25) shows whether audio is playing:
 
 | LED | Meaning |
 |---|---|
-| Off | USB not enumerated, or idle (silence being transmitted) |
-| Blinking | Enumerated, no audio stream open |
-| On | Host is streaming and the feedback loop has settled |
+| 2 short flashes | The host has just enumerated the device |
+| On | The host is streaming audio to the device |
+| Off | No audio: no host, host idle, or stream closed |
+
+"Audio" means the host has the stream open and is sending samples. Digital
+silence inside an open stream still counts as audio.
+
+The UART console runs at 921600 baud, 8N1, on GPIO 0 (TX) and GPIO 1 (RX).
 
 A coax output can be added later with two resistors and a capacitor; the
 firmware is unchanged.
@@ -77,8 +82,26 @@ USB host --iso OUT--> TinyUSB UAC2 --FIFO--> subframe builder --DMA--> PIO (BMC)
   cells per second. The CPU builds 32-bit subframes (preamble, 24-bit
   left-justified sample, V/U/C/P bits) into a double buffer that DMA streams
   into the PIO FIFO.
-- **Idle behaviour**: when the host stops streaming, silence is transmitted so
-  the receiver stays locked.
+- **Idle behaviour**: when the host stops streaming, silence is transmitted
+  for 3 seconds so the receiver stays locked across track changes and short
+  pauses. After 3 seconds without audio the S/PDIF output stops (line held
+  idle, no carrier), letting the receiver drop lock, auto-switch inputs or
+  go to standby. It restarts when the host streams again.
+
+## Source layout
+
+```
+src/
+  main.c            init and main loop
+  board_config.h    pin assignments
+  usb/              USB descriptors, UAC2 class, TinyUSB config
+  app/              audio sink, status LED, console / diagnostic status
+  diag/             crash and hang diagnostics
+tools/              host-side test and diagnostic scripts
+```
+
+The S/PDIF transmitter (`src/spdif/`) and sample-rate clock switching
+(`src/clock/`) will get their own folders.
 
 ## Toolchain
 
@@ -90,16 +113,57 @@ USB host --iso OUT--> TinyUSB UAC2 --FIFO--> subframe builder --DMA--> PIO (BMC)
 
 ## Building
 
+In VS Code, open the folder and run "Import Project" from the Raspberry Pi
+Pico extension; it installs the SDK and toolchain and generates the
+`.vscode` settings. From the command line:
+
 ```
 cmake -S . -B build -G Ninja -DPICO_BOARD=pico2
 cmake --build build
 ```
 
-Flash with picotool or copy `build/usb2spdif.uf2` to the BOOTSEL drive.
+## Flashing
+
+First time: hold BOOTSEL while plugging in the Pico 2, then copy
+`build/usb2spdif.uf2` to the drive, or run `picotool load -x build/usb2spdif.uf2`.
+
+After that the firmware exposes the picotool reset interface, so it can be
+reflashed without touching the button:
+
+```
+picotool load -x build/usb2spdif.uf2 -f --vid 0x1209 --pid 0x0001
+```
+
+## Testing on Windows
+
+The device appears as an audio output named "SPDIF Interface (USB to S/PDIF)".
+Windows may make it the default playback device when first plugged in.
+
+Host tools in `tools/` (`pip install -r tools/requirements.txt`):
+
+- `tools/stream_test.py` plays a tone at every rate and bit depth in WASAPI
+  exclusive mode and checks, through the device's diagnostic string, that the
+  device runs the requested format with a stable buffer and no underruns.
+- `tools/diag.py` reads the diagnostic string: previous-boot crash record
+  (panic, fault or hang location) and live stream status. This works without
+  a debug probe or UART.
 
 ## Status
 
-Project skeleton. See `CLAUDE.md` for the development plan and conventions.
+- Step 1, bring-up: done.
+- Step 2, UAC2 device: done. Enumerates on Windows 11, all 5 rates x 2 bit
+  depths stream correctly, feedback holds the buffer at half full. Audio is
+  consumed by a placeholder sink; S/PDIF output comes in step 3.
+
+Known limitations:
+
+- Apple hosts (macOS, iPadOS, iOS) need the 3-byte 10.14 feedback format,
+  which Windows rejects. The device recognises Apple hosts by their
+  enumeration order and serves them a matching configuration. Verified on
+  Windows; Apple devices still to be confirmed.
+- Linux is untested.
+- The USB ID 1209:0001 is the pid.codes test ID. A dedicated PID is needed
+  before public release.
 
 ## License
 
