@@ -15,7 +15,13 @@ with the ziglang package into tools/build/) and reads the reports.
 
 Sweep order: 48k/16, 48k/24, 44.1k/24, 96k/16, 88.2k/16, 88.2k/24, 32k/24,
 32k/16, 44.1k/16, 96k/24: 16 <-> 24 bit at the same rate and clock family
-switches in both directions. Each format plays for 7 s and is read at
+switches in both directions. In UAC1 mode (mode pin grounded, detected from
+the diagnostic string) the device only offers 16 bit at up to 48 kHz: the
+sweep is 48k/16, 44.1k/16, 32k/16 (clock family switches both ways). There
+the output clock follows the host (adaptive), so the measured rate is the
+host's clock against the Pico crystal; the same +-2000 ppm check applies,
+and the S/PDIF rate trim and clock servo lock are reported. A trim at the
+servo limit (+-1500 ppm) fails. Each format plays for 7 s and is read at
 2.5 ... 6.5 s. It passes when every read shows the stream and S/PDIF output
 at the requested format, a clean window of pattern frames only ("ok": no
 silent frames, no cell / parity / order / V/U / pattern errors), the right
@@ -80,6 +86,9 @@ SWEEP = [(48000, 16), (48000, 24), (44100, 24), (96000, 16), (88200, 16),
          (88200, 24), (32000, 24), (32000, 16), (44100, 16), (96000, 24)]
 PLAY_SECONDS = 7.0
 SAMPLE_AT = (2.5, 3.5, 4.5, 5.5, 6.5)     # the first read is the baseline
+SWEEP_UAC1 = [(48000, 16), (44100, 16), (32000, 16)]
+UAC1_RATES = (32000, 44100, 48000)
+TRIM_LIMIT_PPM = 1500   # CLOCK_SERVO_MAX_PPB
 RATE_CODE = {32000: 0x03, 44100: 0x00, 48000: 0x02, 88200: 0x08, 96000: 0x0A}
 LEN_CODE = {16: 0x02, 24: 0x0B}
 MAX_PPM = 2000
@@ -176,12 +185,18 @@ def parse_diag(s):
     m = re.match(r"^b(\d+) (\S+)", head)
     if not m or not sep:
         return None
-    d = {"raw": s, "boots": int(m.group(1)), "prev": m.group(2), "app": app, "fields": {}}
+    d = {"raw": s, "boots": int(m.group(1)), "prev": m.group(2), "app": app, "fields": {},
+         "uac1": False}
     t = app.split()
-    if t and re.fullmatch(r"[DIS][ao]", t[0]):
+    if t and re.fullmatch(r"[DIS][ao1]", t[0]):
         d["link"], d["host"] = t[0][0], t[0][1]
+        d["uac1"] = d["host"] == "1"
         t = t[1:]
     for tok in t:
+        m = re.fullmatch(r"tr(-?\d+)([LU])", tok)
+        if m:
+            d["trim"], d["locked"] = int(m.group(1)), m.group(2) == "L"
+            continue
         m = re.fullmatch(r"(\d+)/(\d+)", tok)
         if m:
             d["rate"], d["bits"] = int(m.group(1)), int(m.group(2))
@@ -266,7 +281,21 @@ def counter_increases(a, b):
 def app_summary(dg):
     if not dg:
         return ""
-    return " ".join(f"{k}{v}" for k, v in dg["fields"].items() if k not in ("tx", "ff"))
+    s = " ".join(f"{k}{v}" for k, v in dg["fields"].items() if k not in ("tx", "ff"))
+    if "trim" in dg:
+        s += f" trim {dg['trim']:+d} ppm {'locked' if dg['locked'] else 'not locked'}"
+    return s
+
+
+def check_trim(dg):
+    """UAC1: failure reasons from the adaptive clock trim."""
+    if not dg or not dg["uac1"]:
+        return []
+    if "trim" not in dg:
+        return ["no trim in the diagnostic string"]
+    if abs(dg["trim"]) >= TRIM_LIMIT_PPM:
+        return [f"trim {dg['trim']:+d} ppm at the servo limit"]
+    return []
 
 
 def wait_until(t0, at):
@@ -291,7 +320,8 @@ def play_item(rd, exe, device, rate, bits, boots):
     if code != 0:
         fails.append(f"player exit {code}: {err}")
     for (dg, st), at in zip(reads, SAMPLE_AT):
-        for reason in check_device(dg, rate, bits, boots) + check_output(st, rate, bits):
+        for reason in (check_device(dg, rate, bits, boots) + check_output(st, rate, bits) +
+                       check_trim(dg)):
             fails.append(f"@{at:.1f}s {reason}")
     seqs = [st["seq"] for _, st in reads if st]
     if any(a == b for a, b in zip(seqs, seqs[1:])):
@@ -335,8 +365,8 @@ def stop_test(rd, rate, boots):
     return fails, stopped_at, raw2
 
 
-def run_sweep(rd, exe, args, boots):
-    sweep = SWEEP
+def run_sweep(rd, exe, args, boots, uac1):
+    sweep = SWEEP_UAC1 if uac1 else SWEEP
     if args.only:
         rate, bits = (int(x) for x in args.only.split("/"))
         sweep = [(rate, bits)]
@@ -389,11 +419,20 @@ def run_soak(rd, exe, args, boots):
         events.append(msg)
         print(f"{stamp} +{time.time() - t0:7.1f}s  {msg}")
 
+    trims = []
+    unlocked = 0
+
+    def note_clock(dg):
+        nonlocal unlocked
+        if dg and "trim" in dg:
+            trims.append(dg["trim"])
+            unlocked += not dg["locked"]
+
     try:
         wait_until(t0, SOAK_WARMUP)
         prev = rd.read("base")[:2]
         for reason in (check_device(prev[0], rate, bits, boots) +
-                       check_output(prev[1], rate, bits)):
+                       check_output(prev[1], rate, bits) + check_trim(prev[0])):
             log(reason)
         next_at, next_progress = SOAK_WARMUP + args.interval, 60.0
         while next_at <= SOAK_WARMUP + seconds:
@@ -404,7 +443,9 @@ def run_soak(rd, exe, args, boots):
                 break
             cur = rd.read(f"{time.time() - t0:.0f}s")[:2]
             dg, st = cur
-            for reason in check_device(dg, rate, bits, boots) + check_output(st, rate, bits):
+            note_clock(dg)
+            for reason in (check_device(dg, rate, bits, boots) + check_output(st, rate, bits) +
+                           check_trim(dg)):
                 log(reason)
             for reason in counter_increases(prev, cur):
                 log(reason)
@@ -425,6 +466,9 @@ def run_soak(rd, exe, args, boots):
 
     elapsed = (time.time() - t0) / 60.0
     ok = not events
+    if trims:
+        print(f"adaptive clock: trim {min(trims):+d} .. {max(trims):+d} ppm, "
+              f"{unlocked} of {len(trims)} reads not locked")
     print(f"soak {rate}/{bits}: {'PASS' if ok else 'FAIL'}, {elapsed:.1f} min, "
           f"{len(events)} events")
     return ok
@@ -470,8 +514,8 @@ def main():
     ap.add_argument("--soak", type=float, metavar="MINUTES", help="soak one format")
     ap.add_argument("--rate", type=int, default=48000, choices=sorted(RATE_CODE),
                     help="soak sample rate (default 48000)")
-    ap.add_argument("--bits", type=int, default=24, choices=(16, 24),
-                    help="soak bit depth (default 24)")
+    ap.add_argument("--bits", type=int, choices=(16, 24),
+                    help="soak bit depth (default 24; 16 in UAC1 mode)")
     ap.add_argument("--interval", type=float, default=5.0, metavar="S",
                     help="soak read interval (default 5 s)")
     ap.add_argument("--device", help="playback device name part (default 'USB to S/PDIF')")
@@ -494,8 +538,17 @@ def main():
     if st is None:
         sys.exit(f"no self-test report ({raw}): flash a build with -DUSB2SPDIF_SELFTEST=ON")
     boots = dg["boots"]
+    uac1 = dg["uac1"]
     print(f"device: {dg['raw']}")
     print(f"report: {raw}")
+    print(f"mode:   {'UAC1 (adaptive, 16 bit, up to 48 kHz)' if uac1 else 'UAC2'}")
+    if args.bits is None:
+        args.bits = 16 if uac1 else 24
+    formats = [(args.rate, args.bits)] if args.soak else []
+    if args.only:
+        formats.append(tuple(int(x) for x in args.only.split("/")))
+    if uac1 and st["pattern"] and any(r not in UAC1_RATES or b != 16 for r, b in formats):
+        sys.exit(f"UAC1 mode offers 16 bit at {', '.join(map(str, UAC1_RATES))} Hz only")
     if st["state"] == "NOPIO":
         sys.exit("self-test could not claim a PIO state machine or DMA channel")
     if not st["pattern"]:
@@ -507,7 +560,7 @@ def main():
     if args.soak:
         ok = run_soak(rd, exe, args, boots)
     else:
-        ok = run_sweep(rd, exe, args, boots)
+        ok = run_sweep(rd, exe, args, boots, uac1)
     sys.exit(0 if ok else 1)
 
 

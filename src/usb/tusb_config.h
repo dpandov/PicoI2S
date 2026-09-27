@@ -43,22 +43,21 @@ extern "C" {
 // Audio class
 //--------------------------------------------------------------------+
 
-#define CFG_TUD_AUDIO_FUNC_1_DESC_LEN       USB2SPDIF_AUDIO_DESC_LEN
-#define CFG_TUD_AUDIO_FUNC_1_N_AS_INT       1
-#define CFG_TUD_AUDIO_FUNC_1_CTRL_BUF_SZ    64
+// Largest reply is the clock RANGE (see usb_audio.c).
+#define CFG_TUD_AUDIO_CTRL_BUF_SZ           64
 
-// Sized for the largest alt setting: 96 kHz, 4-byte subslots, stereo.
+// Sized for the largest alt setting of either mode: UAC2 96 kHz, 4-byte
+// subslots, stereo.
 #define CFG_TUD_AUDIO_ENABLE_EP_OUT         1
-#define CFG_TUD_AUDIO_FUNC_1_EP_OUT_SZ_MAX  TUD_AUDIO_EP_SIZE(AUDIO_MAX_SAMPLE_RATE, AUDIO_24BIT_SUBSLOT, AUDIO_N_CHANNELS)
+#define CFG_TUD_AUDIO_FUNC_1_EP_OUT_SZ_MAX  TUD_AUDIO_EP_SIZE(false, AUDIO_MAX_SAMPLE_RATE, AUDIO_24BIT_SUBSLOT, AUDIO_N_CHANNELS)
 
-// 12 max-size packets. Feedback holds it half full (6 ms at 96 kHz / 24-bit,
-// 24 ms at 48 kHz / 16-bit); the upper half takes the pre-roll (see
-// audio_pipeline.c). Must be a multiple of both frame sizes (4, 8).
+// 12 max-size packets. Feedback (UAC2) or the clock servo (UAC1) holds it
+// half full (6 ms at 96 kHz / 24-bit, 24 ms at 48 kHz / 16-bit); the upper
+// half takes the pre-roll (see audio_pipeline.c). Must be a multiple of
+// both frame sizes (4, 8).
 #define CFG_TUD_AUDIO_FUNC_1_EP_OUT_SW_BUF_SZ (12 * CFG_TUD_AUDIO_FUNC_1_EP_OUT_SZ_MAX)
 
 #define CFG_TUD_AUDIO_ENABLE_FEEDBACK_EP    1
-// Overridden per host by tud_audio_feedback_format_correction_cb().
-#define CFG_TUD_AUDIO_ENABLE_FEEDBACK_FORMAT_CORRECTION 0
 
 #ifdef __cplusplus
 }

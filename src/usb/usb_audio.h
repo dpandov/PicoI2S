@@ -1,9 +1,19 @@
-// USB Audio Class 2.0 function: received PCM stream and its format.
+// USB audio function (UAC2 or UAC1): received PCM stream and its format.
 // Main loop only; not callable from interrupts.
 #pragma once
 
 #include <stdbool.h>
 #include <stdint.h>
+
+// Selected once at boot (UAC_MODE_PIN).
+typedef enum {
+    // Asynchronous with a feedback endpoint: 32 to 96 kHz, 16 and 24 bit.
+    USB_AUDIO_MODE_UAC2 = 0,
+    // PCM2704-like for TVs and old hosts: adaptive endpoint, no feedback,
+    // 32 / 44.1 / 48 kHz, 16 bit. The output clock follows the host
+    // (app/clock_servo.h).
+    USB_AUDIO_MODE_UAC1,
+} usb_audio_mode_t;
 
 typedef enum {
     USB_AUDIO_DETACHED = 0,   // not configured by a host
@@ -37,16 +47,22 @@ typedef struct {
 #define USB_AUDIO_EVT_STREAM_STOP     (1u << 3)
 #define USB_AUDIO_EVT_RATE_CHANGED    (1u << 4)
 
-// Supported sample rates, ascending.
+// Supported sample rates in UAC2 mode, ascending. UAC1 offers those up to
+// UAC1_MAX_SAMPLE_RATE (usb_descriptors.h).
 extern const uint32_t usb_audio_sample_rates[];
 extern const uint8_t  usb_audio_n_sample_rates;
 
 // Call once before tusb_init().
-void usb_audio_init(void);
+void usb_audio_init(usb_audio_mode_t mode);
+
+// Fixed from usb_audio_init() on; the one call that is safe in interrupts.
+usb_audio_mode_t   usb_audio_mode(void);
 
 usb_audio_link_t   usb_audio_link_state(void);
 
 // Last format set by the host (48 kHz / 16-bit at boot); valid when idle.
+// UAC1 hosts may set the rate only after opening the stream, and some never
+// do: 48 kHz is assumed then (reset on every enumeration).
 usb_audio_format_t usb_audio_format(void);
 
 // Returns and clears pending USB_AUDIO_EVT_* bits. Bits do not encode order
@@ -56,6 +72,9 @@ uint32_t usb_audio_take_events(void);
 
 void usb_audio_get_stats(usb_audio_stats_t *stats);
 void usb_audio_fifo_max_reset(void);
+
+// Bytes currently in the receive FIFO.
+uint32_t usb_audio_fifo_level(void);
 
 // Reads up to max_bytes of interleaved little-endian PCM, whole stereo
 // frames only. Returns the number of bytes read.

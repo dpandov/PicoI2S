@@ -27,6 +27,7 @@
 #include "pico.h"
 
 #include "spdif/spdif_encode.h"
+#include "spdif/spdif_trim.h"
 #include "spdif_tx.pio.h"
 
 #define CELLS_PER_FRAME 128u
@@ -67,10 +68,17 @@ static spdif_encoder_t encoder;
 static spdif_source_fn source_fn;
 static volatile bool running;
 static uint32_t tx_rate;
+static uint32_t tx_div;          // integer PIO divider at zero trim
+static int32_t tx_error_ppb;
 static uint8_t tx_bits;
 static volatile uint32_t generation;
 static volatile uint32_t late_irqs;
 static bool late_prev;          // the last interrupt was late
+
+// Main loop only.
+static spdif_trim_t trim;
+static int32_t trim_ppb;
+static uint32_t trim_reg;       // CLKDIV value last written
 
 // State of the last serviced interrupt.
 static uint irq_buf;            // buffer the DMA was reading
@@ -154,7 +162,8 @@ static void __not_in_flash_func(dma_irq_handler)(void) {
 }
 
 // Integer divider only: a fractional divider dithers the cell period, which
-// shows up as jitter on the S/PDIF line. Returns 0 if out of tolerance.
+// shows up as jitter on the S/PDIF line (the trim adds a fraction only on
+// request). Returns 0 if out of tolerance.
 static uint32_t pio_divider(uint32_t sample_rate) {
     uint32_t clk = clock_get_hz(clk_sys);
     uint32_t target = CELLS_PER_FRAME * sample_rate;
@@ -166,6 +175,12 @@ static uint32_t pio_divider(uint32_t sample_rate) {
     if (err * 1000000u > (uint64_t)MAX_CLOCK_PPM * actual)
         return 0;
     return div;
+}
+
+static int32_t rate_error_ppb(uint32_t div, uint32_t sample_rate) {
+    uint64_t clk = clock_get_hz(clk_sys);
+    uint64_t cells = (uint64_t)CELLS_PER_FRAME * div * sample_rate;
+    return (int32_t)((int64_t)((clk * 1000000000u + cells / 2u) / cells) - 1000000000);
 }
 
 static bool rate_supported(uint32_t sample_rate) {
@@ -235,6 +250,11 @@ static bool tx_start(uint32_t sample_rate, uint8_t word_bits, spdif_source_fn so
 
     source_fn = source;
     tx_rate = sample_rate;
+    tx_div = div;
+    tx_error_ppb = rate_error_ppb(div, sample_rate);
+    trim_ppb = 0;
+    spdif_trim_reset(&trim, div < 256u ? div : 0u, timer_hw->timerawl);
+    trim_reg = spdif_trim_clkdiv_reg(trim.applied);
     tx_bits = word_bits;
     buf_us = (SPDIF_TX_BUFFER_FRAMES * 1000000u + sample_rate / 2u) / sample_rate;
     spdif_encoder_init(&encoder, cs);
@@ -268,6 +288,8 @@ static void tx_stop(void) {
         return;
     running = false;
     tx_rate = 0;
+    tx_error_ppb = 0;
+    trim_ppb = 0;
     tx_bits = 0;
 
     dma_irqn_set_channel_mask_enabled(DMA_IRQ_INDEX, data_mask, false);
@@ -336,6 +358,35 @@ bool spdif_tx_set_word_bits(uint8_t word_bits) {
     bool ok = tx_set_word_bits(word_bits);
     change_end();
     return ok;
+}
+
+// Writing CLKDIV while running does not restart the divider (only
+// CTRL.CLKDIV_RESTART does), so the cell phase stays continuous.
+bool spdif_tx_set_trim_ppb(int32_t ppb) {
+    if (!running || tx_div > 255u)
+        return false;
+    trim_ppb = spdif_trim_clamp(ppb);
+    spdif_trim_set_target(&trim, spdif_trim_divider(tx_div, trim_ppb), timer_hw->timerawl);
+    return true;
+}
+
+int32_t spdif_tx_trim_ppb(void) {
+    return trim_ppb;
+}
+
+void spdif_tx_trim_task(void) {
+    // On a whole FRAC step there is nothing to dither.
+    if (!running || trim.applied == trim.target)
+        return;
+    uint32_t reg = spdif_trim_clkdiv_reg(spdif_trim_dither(&trim, timer_hw->timerawl));
+    if (reg != trim_reg) {
+        trim_reg = reg;
+        tx_pio->sm[tx_sm].clkdiv = reg;
+    }
+}
+
+int32_t spdif_tx_rate_error_ppb(void) {
+    return tx_error_ppb;
 }
 
 uint32_t spdif_tx_generation(void) {

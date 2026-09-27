@@ -5,12 +5,15 @@ USB to S/PDIF (Toslink) bridge firmware for the Raspberry Pi Pico 2 (RP2350).
 The Pico enumerates as a USB Audio Class 2.0 device in asynchronous mode and
 transmits the received PCM stream as S/PDIF through a Toslink optical
 transmitter. No external DAC, no external clock, no drivers on the host.
+For hosts without UAC2 support (TVs, older Windows) a jumper switches it to
+a USB Audio Class 1.0 mode (see [UAC1 mode](#uac1-mode)).
 
 ## Supported formats
 
-| Sample rates | Bit depths | Channels |
-|---|---|---|
-| 32, 44.1, 48, 88.2, 96 kHz | 16, 24 | 2 (stereo) |
+| Mode | Sample rates | Bit depths | Channels |
+|---|---|---|---|
+| UAC2 (default) | 32, 44.1, 48, 88.2, 96 kHz | 16, 24 | 2 (stereo) |
+| UAC1 (GP5 to GND) | 32, 44.1, 48 kHz | 16 | 2 (stereo) |
 
 ## Hardware
 
@@ -40,6 +43,20 @@ the board, keeping the three wires to the module short.
 
 Pin 1 is the pin nearest the mounting peg side when the jack opening faces
 you; check the datasheet drawing in case of doubt.
+
+### Mode jumper
+
+GPIO 5 (pin 7) selects the USB audio class. It is read once at power-up
+with the internal pull-up enabled; changing it later has no effect until
+the next power-up or reset.
+
+| GP5 (pin 7) | Mode |
+|---|---|
+| Open | UAC2 (default) |
+| Jumper to GND (pin 8) | UAC1 |
+
+Pins 7 and 8 are next to each other, so a single 2.54 mm jumper (or a
+switch) between them does it.
 
 ### Status LED
 
@@ -91,25 +108,59 @@ USB host --iso OUT--> TinyUSB FIFO --main loop--> PCM ring --DMA IRQ: BMC encode
   idle, no carrier), letting the receiver drop lock, auto-switch inputs or
   go to standby. It restarts when the host streams again.
 
+## UAC1 mode
+
+Many TVs, set-top boxes, car head units and Windows before 10 (1703) only
+drive USB Audio Class 1.0 devices, typically the PCM2704-style USB DACs.
+With GP5 grounded at power-up the bridge presents itself like one of those:
+
+- USB Audio Class 1.0, no interface association (a plain composite
+  device), its own USB ID 1209:0002 and the product name
+  "USB to S/PDIF (UAC1)". Windows binds its built-in `usbaudio.sys`.
+- One streaming format: 16-bit stereo at 32, 44.1 or 48 kHz, set by the
+  host through the endpoint's sampling-frequency control. A host that never
+  sets the rate gets 48 kHz.
+- No volume control on the device, as in UAC2: the output stays
+  bit-perfect and the host applies its volume in software.
+- Adaptive isochronous endpoint without a feedback endpoint. The host sends
+  at its own clock and the bridge follows it: a control loop on the USB
+  receive buffer level trims the S/PDIF rate in steps of parts per billion
+  (by dithering the PIO clock divider's fraction), so the S/PDIF clock is
+  the host's clock. At stream start it locks within about 1.5 s, then
+  narrows its bandwidth over about a minute and holds the rate within
+  about 1 ppm of the host's. The trim range is +-1500 ppm,
+  which leaves at least +-1100 ppm for the host's clock offset after the
+  PLL error is cancelled.
+- The picotool reset interface and the diagnostic strings work as in UAC2
+  (`--pid 0x0002` for picotool).
+
+Limits compared with UAC2: 16 bit only, 48 kHz maximum, and the S/PDIF
+clock carries the host's clock quality (drift, and a small dither of the
+PIO divider) instead of the Pico's crystal. Use UAC2 whenever the host
+supports it.
+
 ## Source layout
 
 ```
 src/
   main.c            init and main loop
   board_config.h    pin assignments
-  usb/              USB descriptors, UAC2 class, TinyUSB config
-  app/              audio pipeline, status LED, console / diagnostic status,
-                    test tone
+  usb/              USB descriptors, UAC2 / UAC1 class, TinyUSB config
+  app/              audio pipeline, adaptive clock servo (UAC1), status LED,
+                    console / diagnostic status, test tone
   spdif/            S/PDIF encoder, PIO program, DMA driver
   clock/            system PLL per sample-rate family
   diag/             crash and hang diagnostics
   selftest/         optional S/PDIF output self-test (decoder on core 1)
 tools/              host-side test and diagnostic scripts
+lib/tinyusb/        TinyUSB (git submodule, pinned release)
 ```
 
 ## Toolchain
 
-- Raspberry Pi Pico SDK 2.x (RP2350 support, bundled TinyUSB)
+- Raspberry Pi Pico SDK 2.x (RP2350 support)
+- TinyUSB 0.21.0, as the git submodule `lib/tinyusb` (used instead of the
+  older copy bundled with the SDK)
 - ARM GCC, CMake, Ninja, picotool: all installed by the
   [Raspberry Pi Pico VS Code extension](https://marketplace.visualstudio.com/items?itemName=raspberry-pi.raspberry-pi-pico)
 - Raspberry Pi Debug Probe (SWD + UART console) for debugging, since the
@@ -119,7 +170,9 @@ tools/              host-side test and diagnostic scripts
 
 In VS Code, open the folder and run "Import Project" from the Raspberry Pi
 Pico extension; it installs the SDK and toolchain and generates the
-`.vscode` settings. From the command line:
+`.vscode` settings. TinyUSB is a submodule, so clone with
+`git clone --recursive`, or run `git submodule update --init` in an
+existing clone. From the command line:
 
 ```
 cmake -S . -B build -G Ninja -DPICO_BOARD=pico2
@@ -142,10 +195,14 @@ reflashed without touching the button:
 picotool load -x build/usb2spdif.uf2 -f --vid 0x1209 --pid 0x0001
 ```
 
+In UAC1 mode use `--pid 0x0002`.
+
 ## Testing on Windows
 
 The device appears as an audio output named "SPDIF Interface (USB to S/PDIF)".
 Windows may make it the default playback device when first plugged in.
+The host tools detect the mode from the diagnostic string; in UAC1 mode they
+test 32 / 44.1 / 48 kHz at 16 bit and report the adaptive clock's rate trim.
 
 Host tools in `tools/` (`pip install -r tools/requirements.txt`):
 
@@ -210,6 +267,13 @@ of it.
   USB overruns and underruns are detected and counted; logging never
   blocks. Short soak (10 min each at 96/24 and 44.1/16) bit-exact with
   zero glitches. Long soak pending.
+- USB stack: TinyUSB 0.21. UAC2 re-verified on Windows (all formats
+  bit-exact, rapid stream open/close cycles); iPad check of the new Apple
+  feedback path pending.
+- UAC1 mode: verified on Windows 11 with the classic usbaudio driver: all
+  3 rates bit-exact, the S/PDIF clock follows the host within a few ppm,
+  5-minute soak with the trim steady to 1 ppm, pause/resume without a
+  trim swing. TV testing pending.
 
 Known limitations:
 
@@ -218,8 +282,11 @@ Known limitations:
   enumeration order and serves them a matching configuration. macOS is
   untested.
 - Linux is untested.
-- The USB ID 1209:0001 is the pid.codes test ID. A dedicated PID is needed
-  before public release.
+- The USB IDs 1209:0001 (UAC2) and 1209:0002 (UAC1) are pid.codes test
+  IDs. Dedicated PIDs are needed before public release.
+- In UAC1 mode on Windows before 8.1 the picotool reset interface has no
+  driver (MS OS 2.0 descriptors need 8.1 or later) and shows up as an
+  unknown device; audio is not affected.
 
 ## License
 

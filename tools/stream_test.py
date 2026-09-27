@@ -11,6 +11,11 @@ and bit depths, so it covers clock switches and word-length changes on a
 running output. After the last combination the output must keep sending
 silence for about 3 s and then stop.
 
+In UAC1 mode (mode pin grounded, detected from the diagnostic string) the
+device offers 32 / 44.1 / 48 kHz at 16 bit only, so only those are played;
+the S/PDIF rate trim of the adaptive clock and the clock servo lock are
+reported per format.
+
     pip install sounddevice numpy pyusb libusb-package
     python tools/stream_test.py
 """
@@ -26,6 +31,8 @@ from diag import read_diag
 
 RATES = [32000, 44100, 48000, 88200, 96000]
 BITS = [16, 24]
+UAC1_RATES = [32000, 44100, 48000]
+UAC1_BITS = [16]
 PLAY_SECONDS = 6
 SAMPLE_AT = (2.0, 3.5, 5.0)
 # Seconds after playback ends: output still running, then stopped.
@@ -48,10 +55,16 @@ def tone(rate, bits):
 
 
 def status_fields(status):
-    """'So 48000/24 ff4656 ur0 run1 led1 tx48000 ov0 ...' -> dict of fields."""
+    """'So 48000/24 ff4656 ur0 run1 led1 tx48000 ov0 ...' -> dict of fields.
+    UAC1 mode: second character '1', and 'tr<ppm>L|U' at the end."""
     tok = status.split()
-    f = {"link": tok[0][:1] if tok else "", "format": tok[1] if len(tok) > 1 else ""}
+    f = {"link": tok[0][:1] if tok else "", "format": tok[1] if len(tok) > 1 else "",
+         "uac1": tok[0][1:2] == "1" if tok else False}
     for t in tok[2:]:
+        m = re.fullmatch(r"tr(-?\d+)([LU])", t)
+        if m:
+            f["trim"], f["locked"] = int(m.group(1)), m.group(2) == "L"
+            continue
         m = re.fullmatch(r"([a-z]+)(\d+)", t)
         if m:
             f[m.group(1)] = int(m.group(2))
@@ -75,13 +88,19 @@ def sample_after(backend, t0, times):
 
 def main():
     backend = libusb_package.get_libusb1_backend()
+    status = read_diag(backend).split("| ")[-1]
+    if status.startswith("<"):
+        sys.exit(f"usb2spdif not found: {status}")
+    uac1 = status_fields(status)["uac1"]
+    rates, bits_list = (UAC1_RATES, UAC1_BITS) if uac1 else (RATES, BITS)
+    print(f"device in {'UAC1' if uac1 else 'UAC2'} mode: {status}")
     out = find_output()
     all_ok = True
     lp_max = 0
     # Rate outer, bits inner: every rate step changes the clock family
     # (32 -> 44.1 -> 48 -> 88.2 -> 96), every bits step keeps the rate.
-    for rate in RATES:
-        for bits in BITS:
+    for rate in rates:
+        for bits in bits_list:
             # WASAPI streams must be opened from the main thread.
             sd.play(tone(rate, bits), samplerate=rate, device=out,
                     extra_settings=sd.WasapiSettings(exclusive=True), blocking=False)
@@ -94,13 +113,18 @@ def main():
             lt = max(f.get("lt", 0) for f in fields)
             rmin = min(f.get("rmin", 0) for f in fields)
             lp_max = max(lp_max, lp)
+            clock = ""
+            if uac1:
+                last = fields[-1]
+                clock = (f", trim {last.get('trim')} ppm "
+                         f"{'locked' if last.get('locked') else 'not locked'}")
             print(f"{rate:6d} Hz {bits}-bit: {'PASS' if ok else 'FAIL'}   "
-                  f"lp {lp} us, lt {lt}, rmin {rmin}   {samples[-1]}")
+                  f"lp {lp} us, lt {lt}, rmin {rmin}{clock}   {samples[-1]}")
 
     # 3 s of silence after the stream ends, then no carrier.
     running, stopped = sample_after(backend, time.time(), IDLE_CHECK_AT)
     fr, fs = status_fields(running), status_fields(stopped)
-    ok = (fr.get("tx") == RATES[-1] and fr.get("led") == 0
+    ok = (fr.get("tx") == rates[-1] and fr.get("led") == 0
           and fs.get("tx") == 0 and fs.get("led") == 0)
     all_ok &= ok
     print(f"idle stop:        {'PASS' if ok else 'FAIL'}   {running}  ->  {stopped}")

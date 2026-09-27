@@ -29,7 +29,7 @@ enum {
 typedef struct {
     uint32_t loops;         // main loop iterations
     uint32_t set_itf;       // SET_INTERFACE callbacks
-    uint32_t clock_req;     // clock entity requests
+    uint32_t clock_req;     // clock entity (UAC2) or endpoint rate (UAC1) requests
 } diag_counters_t;
 
 extern volatile diag_counters_t diag_cnt;

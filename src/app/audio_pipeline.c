@@ -3,6 +3,7 @@
 #include "pico.h"
 #include "pico/time.h"
 
+#include "app/clock_servo.h"
 #include "app/log.h"
 #include "clock/audio_clock.h"
 #include "diag/diag.h"
@@ -14,9 +15,9 @@
 #define RING_FRAMES   512u
 #define RING_MASK     (RING_FRAMES - 1u)
 // Topped up to this level only, so most of the buffering stays in the USB
-// FIFO, where the feedback endpoint regulates it. It only has to bridge
-// main-loop stalls: 2 ms at 96 kHz, and at least two DMA buffers. A longer
-// stall loses USB packets anyway (the endpoint is re-armed from tud_task()).
+// FIFO, where the feedback endpoint (UAC2) or the clock servo (UAC1)
+// regulates it. It only has to bridge main-loop stalls: 2 ms at 96 kHz,
+// and at least two DMA buffers.
 #define RING_TARGET_MIN  192u
 #define RING_TARGET   (2u * SPDIF_TX_BUFFER_FRAMES > RING_TARGET_MIN ? \
                        2u * SPDIF_TX_BUFFER_FRAMES : RING_TARGET_MIN)
@@ -54,6 +55,13 @@ typedef struct {
 } pipeline_t;
 
 static pipeline_t p;
+
+// UAC1: steers the output rate to the host's. Runs while playing.
+static clock_servo_t servo;
+
+static bool adaptive(void) {
+    return usb_audio_mode() == USB_AUDIO_MODE_UAC1;
+}
 
 // The interrupt runs to completion before the main loop resumes, so only
 // the producer side needs ordering. A short ring plays what it has, then
@@ -138,14 +146,24 @@ static void output_stop(void) {
     log_printf("spdif: stop\n");
 }
 
+// FIFO level held by the feedback (UAC2) or the clock servo (UAC1).
+static uint32_t fifo_setpoint(uint32_t depth) {
+    return depth / 2u;
+}
+
 // FIFO level that starts playback. The start moves RING_TARGET + DMA_FRAMES
-// out of the FIFO, so waiting for that much above half leaves the FIFO at
-// the feedback's set point and the stream starts with its steady-state
-// buffering. Capped two packets below full: a packet or two may arrive
-// between checks, and a full FIFO overwrites.
+// out of the FIFO, so waiting for that much above the set point leaves the
+// FIFO there and the stream starts with its steady-state buffering. Capped
+// two packets below full: a packet or two may arrive between checks, and a
+// full FIFO overwrites.
+// A running output does not take its two DMA buffers from the FIFO. The
+// UAC2 feedback absorbs those extra frames; the UAC1 clock servo only
+// holds a starting level within two chunks of the set point, so there they
+// are left out.
 static uint32_t preroll_bytes(const usb_audio_format_t *f, uint32_t depth) {
     uint32_t frame_bytes = 2u * f->subslot_bytes;
-    uint32_t want = depth / 2u + (RING_TARGET + DMA_FRAMES) * frame_bytes;
+    uint32_t moved = RING_TARGET + (adaptive() && spdif_tx_running() ? 0u : DMA_FRAMES);
+    uint32_t want = fifo_setpoint(depth) + moved * frame_bytes;
     uint32_t packet = ((f->sample_rate + 999u) / 1000u + 1u) * frame_bytes;
     uint32_t cap = depth - 2u * packet;
     return want < cap ? want : cap;
@@ -184,8 +202,27 @@ static void stream_started(const usb_audio_format_t *f, uint64_t now) {
     }
 }
 
+// A fresh output starts from the nominal rate (its known clock error
+// removed); a running one resumes the servo, so a restart continues from
+// the locked rate (or from the current trim) without a jump.
+static void servo_start(const usb_audio_format_t *f, uint32_t depth, bool fresh) {
+    clock_servo_params_t sp = {
+        .sample_rate = f->sample_rate,
+        .frame_bytes = 2u * f->subslot_bytes,
+        .setpoint_bytes = fifo_setpoint(depth),
+        .chunk_frames = SPDIF_TX_BUFFER_FRAMES,
+        .trim_ppb = fresh ? -spdif_tx_rate_error_ppb() : spdif_tx_trim_ppb(),
+    };
+    if (fresh) {
+        clock_servo_start(&servo, &sp);
+    } else {
+        clock_servo_resume(&servo, &sp);
+    }
+    spdif_tx_set_trim_ppb(clock_servo_trim_ppb(&servo));
+}
+
 // Pre-roll done: fill the ring and start the output if it is stopped.
-static void begin_playing(const usb_audio_format_t *f, uint64_t now) {
+static void begin_playing(const usb_audio_format_t *f, uint32_t depth, uint64_t now) {
     bool start = !spdif_tx_running();
     if (start) {
         audio_family_t fam = audio_clock_family(f->sample_rate);
@@ -208,6 +245,9 @@ static void begin_playing(const usb_audio_format_t *f, uint64_t now) {
         top_up(f, now);   // the start pre-filled two buffers from the ring
         log_printf("spdif: %lu Hz %u-bit\n", (unsigned long)f->sample_rate, f->resolution);
     }
+    if (adaptive()) {
+        servo_start(f, depth, start);
+    }
     // After the fill: a flag raised before it is stale.
     ring_short = false;
     p.playing = true;
@@ -224,10 +264,11 @@ static void begin_playing(const usb_audio_format_t *f, uint64_t now) {
 static void log_stream_end(void) {
     audio_pipeline_stats_t st;
     audio_pipeline_get_stats(&st);
-    log_printf("pipe: end ur%lu ov%lu lt%lu rmin%lu fmax%lu lp%lu\n",
+    log_printf("pipe: end ur%lu ov%lu lt%lu rmin%lu fmax%lu lp%lu tr%ld\n",
                (unsigned long)st.underruns, (unsigned long)st.overruns,
                (unsigned long)st.late_irqs, (unsigned long)st.ring_min,
-               (unsigned long)st.fifo_max, (unsigned long)st.loop_max_us);
+               (unsigned long)st.fifo_max, (unsigned long)st.loop_max_us,
+               (long)st.trim_ppb);
 }
 
 void audio_pipeline_init(void) {
@@ -275,7 +316,7 @@ void audio_pipeline_task(void) {
         usb_audio_stats_t us;
         usb_audio_get_stats(&us);
         if (us.fifo_level >= preroll_bytes(&f, us.fifo_depth)) {
-            begin_playing(&f, now);
+            begin_playing(&f, us.fifo_depth, now);
         }
     }
 
@@ -286,11 +327,18 @@ void audio_pipeline_task(void) {
             p.st.ring_min = level;
         }
         top_up(&f, now);
+        // Only while playing. Otherwise (underrun, stream closed) the trim
+        // stays, and the next begin_playing() resumes the servo.
+        if (adaptive() && clock_servo_update(&servo, usb_audio_fifo_level(), now)) {
+            spdif_tx_set_trim_ppb(clock_servo_trim_ppb(&servo));
+        }
     }
 
     if (spdif_tx_running() && now - p.last_audio_us >= IDLE_STOP_US) {
         output_stop();
     }
+
+    spdif_tx_trim_task();
 }
 
 bool audio_pipeline_playing(void) {
@@ -306,4 +354,6 @@ void audio_pipeline_get_stats(audio_pipeline_stats_t *stats) {
     stats->late_irqs = spdif_tx_late_irqs() - p.late_irqs_base;
     stats->fifo_max = us.fifo_max;
     stats->loop_max_us = diag_loop_max_us();
+    stats->trim_ppb = spdif_tx_trim_ppb();
+    stats->clock_locked = p.playing && adaptive() && clock_servo_locked(&servo);
 }

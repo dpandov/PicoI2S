@@ -38,6 +38,23 @@ uint8_t spdif_tx_word_bits(void);
 // output. Returns false if stopped or word_bits is unsupported.
 bool spdif_tx_set_word_bits(uint8_t word_bits);
 
+// Rate trim in parts per billion (positive = faster) relative to the
+// integer-divider rate, for following an external clock. Clamped to
+// +/-SPDIF_TRIM_MAX_PPB (spdif_trim.h). Applied by spdif_tx_trim_task(),
+// without re-phasing the output. Reset to 0 by spdif_tx_start(). Returns
+// false if stopped. Main loop only.
+bool spdif_tx_set_trim_ppb(int32_t ppb);
+int32_t spdif_tx_trim_ppb(void);
+
+// Applies the trim by dithering the PIO divider fraction. Call every
+// main-loop iteration; returns at once while the trim is 0.
+void spdif_tx_trim_task(void);
+
+// Rate error of the running output at zero trim against its nominal sample
+// rate, in ppb, from the configured clk_sys (e.g. -186015 at 48 kHz). 0 when
+// stopped.
+int32_t spdif_tx_rate_error_ppb(void);
+
 // Incremented before and after every start, stop and word-length change:
 // odd while the output or its format is changing. For observers on the
 // other core.

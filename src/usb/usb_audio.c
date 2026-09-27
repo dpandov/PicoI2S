@@ -1,16 +1,18 @@
-// USB Audio Class 2.0 function: control requests and stream state.
+// USB audio function (UAC2 or UAC1, see usb_audio_mode_t): control
+// requests and stream state.
 //
-// All tud_* callbacks in the firmware live here. TinyUSB calls them from
-// tud_task() in the main loop, so they never run concurrently with the API.
+// All tud_* callbacks in the firmware live here. Control and state callbacks
+// run from tud_task() in the main loop, so they never run concurrently with
+// the API. The receive and feedback paths run in the USB interrupt:
+// tud_audio_rx_done_isr() and __wrap_usbd_edpt_xfer().
 
 #include "usb/usb_audio.h"
 
 #include <string.h>
 
 #include "hardware/sync.h"
-#include "hardware/structs/usb.h"
-#include "hardware/structs/usb_dpram.h"
 #include "tusb.h"
+#include "device/usbd_pvt.h"
 #include "usb/usb_descriptors.h"
 #include "diag/diag.h"
 
@@ -18,7 +20,8 @@
 // Sample rates
 //--------------------------------------------------------------------+
 
-// Ascending, as UAC2 requires for RANGE subranges.
+// Ascending, as UAC2 requires for RANGE subranges. UAC1 offers the first
+// three (usb_descriptors.c).
 const uint32_t usb_audio_sample_rates[] = {32000, 44100, 48000, 88200, 96000};
 
 #define N_RATES  TU_ARRAY_SIZE(usb_audio_sample_rates)
@@ -27,9 +30,9 @@ const uint8_t usb_audio_n_sample_rates = (uint8_t) N_RATES;
 
 #define DEFAULT_SAMPLE_RATE  48000u
 
-// The driver silently truncates replies to its control buffer.
-typedef audio_control_range_4_n_t(N_RATES) rate_range_t;
-TU_VERIFY_STATIC(sizeof(rate_range_t) <= CFG_TUD_AUDIO_FUNC_1_CTRL_BUF_SZ,
+// The driver STALLs replies that do not fit its control buffer.
+typedef audio20_control_range_4_n_t(N_RATES) rate_range_t;
+TU_VERIFY_STATIC(sizeof(rate_range_t) <= CFG_TUD_AUDIO_CTRL_BUF_SZ,
                  "clock RANGE reply does not fit the audio control buffer");
 
 TU_VERIFY_STATIC(CFG_TUD_AUDIO_FUNC_1_EP_OUT_SW_BUF_SZ <= UINT16_MAX,
@@ -48,14 +51,17 @@ TU_VERIFY_STATIC(CFG_TUD_AUDIO_FUNC_1_EP_OUT_SW_BUF_SZ % 8 == 0,
 //--------------------------------------------------------------------+
 
 static struct {
+    usb_audio_mode_t mode;    // fixed from usb_audio_init() on
     bool     mounted;         // as last reported to the main loop
     uint8_t  stream_alt;      // AS_ALT_* of the streaming interface
     uint32_t sample_rate;
     uint8_t  resolution;      // from the active or last alt setting
     uint8_t  subslot_bytes;
     volatile uint32_t events; // pending USB_AUDIO_EVT_* bits
-    bool     rx_misaligned;   // last packet was not whole frames
-    usb_audio_stats_t stats;
+    volatile bool rx_misaligned; // set in the USB interrupt
+    bool     rx_halted;       // halt of the current stream already counted
+    usb_audio_stats_t stats;  // overruns, bad_packets and fifo_max are also
+                              // written in the USB interrupt
 } s;
 
 static inline void raise_event(uint32_t evt)
@@ -85,8 +91,27 @@ static void reconcile_mount(void)
     }
 }
 
+// After a zero-length packet the driver returns before re-arming the OUT
+// endpoint and without calling tud_audio_rx_done_isr(), so reception stops
+// until the next SET_INTERFACE. The endpoint is then left idle: count that
+// once per stream as a bad packet. Race-free in the main loop, because the
+// interrupt clears and re-sets the busy flag within one packet.
+static void check_rx_halt(void)
+{
+    if (s.stream_alt != AS_ALT_ZERO_BW && !s.rx_halted &&
+        !usbd_edpt_busy(0, EPNUM_AUDIO_OUT)) {
+        s.rx_halted = true;
+        uint32_t irq = save_and_disable_interrupts();
+        s.stats.bad_packets++;
+        restore_interrupts(irq);
+    }
+}
+
 static bool rate_supported(uint32_t rate)
 {
+    if (s.mode == USB_AUDIO_MODE_UAC1 && rate > UAC1_MAX_SAMPLE_RATE) {
+        return false;
+    }
     for (uint32_t i = 0; i < N_RATES; i++) {
         if (usb_audio_sample_rates[i] == rate) {
             return true;
@@ -99,13 +124,34 @@ static bool rate_supported(uint32_t rate)
 // Public API
 //--------------------------------------------------------------------+
 
-void usb_audio_init(void)
+// Accepts a supported rate from the host; raises RATE_CHANGED on a change.
+static bool set_sample_rate(uint32_t rate)
+{
+    if (!rate_supported(rate)) {
+        s.stats.rate_rejects++;
+        return false;
+    }
+    if (rate != s.sample_rate) {
+        s.sample_rate = rate;
+        s.stats.rate_changes++;
+        raise_event(USB_AUDIO_EVT_RATE_CHANGED);
+    }
+    return true;
+}
+
+void usb_audio_init(usb_audio_mode_t mode)
 {
     memset(&s, 0, sizeof(s));
+    s.mode          = mode;
     s.sample_rate   = DEFAULT_SAMPLE_RATE;
     s.resolution    = AUDIO_16BIT_RESOLUTION;
     s.subslot_bytes = AUDIO_16BIT_SUBSLOT;
     s.stats.fifo_depth = (uint16_t) CFG_TUD_AUDIO_FUNC_1_EP_OUT_SW_BUF_SZ;
+}
+
+usb_audio_mode_t usb_audio_mode(void)
+{
+    return s.mode;
 }
 
 usb_audio_link_t usb_audio_link_state(void)
@@ -131,6 +177,7 @@ usb_audio_format_t usb_audio_format(void)
 uint32_t usb_audio_take_events(void)
 {
     reconcile_mount();
+    check_rx_halt();
     uint32_t irq = save_and_disable_interrupts();
     uint32_t evt = s.events;
     s.events = 0;
@@ -140,7 +187,9 @@ uint32_t usb_audio_take_events(void)
 
 void usb_audio_get_stats(usb_audio_stats_t *stats)
 {
+    uint32_t irq = save_and_disable_interrupts();
     *stats = s.stats;
+    restore_interrupts(irq);
     stats->fifo_level = tud_audio_available();
     stats->fifo_depth = (uint16_t) CFG_TUD_AUDIO_FUNC_1_EP_OUT_SW_BUF_SZ;
 }
@@ -150,10 +199,24 @@ void usb_audio_fifo_max_reset(void)
     s.stats.fifo_max = 0;
 }
 
+uint32_t usb_audio_fifo_level(void)
+{
+    return tud_audio_available();
+}
+
 uint32_t usb_audio_read(void *dst, uint32_t max_bytes)
 {
     // The driver clears the FIFO when the stream closes.
     if (s.stream_alt == AS_ALT_ZERO_BW) {
+        return 0;
+    }
+
+    if (s.rx_misaligned) {
+        // Frame boundaries are unknown now: start over from the next packet.
+        uint32_t irq = save_and_disable_interrupts();
+        s.rx_misaligned = false;
+        tud_audio_clear_ep_out_ff();
+        restore_interrupts(irq);
         return 0;
     }
 
@@ -187,6 +250,12 @@ void tud_mount_cb(void)
         s.stream_alt = AS_ALT_ZERO_BW;
         raise_event(USB_AUDIO_EVT_STREAM_STOP);
     }
+    // UAC1 hosts need not set the rate, so a new host starts from the
+    // default, not from the rate the previous host left.
+    if (s.mode == USB_AUDIO_MODE_UAC1 && s.sample_rate != DEFAULT_SAMPLE_RATE) {
+        s.sample_rate = DEFAULT_SAMPLE_RATE;
+        raise_event(USB_AUDIO_EVT_RATE_CHANGED);
+    }
     s.mounted = true;
     raise_event(USB_AUDIO_EVT_MOUNTED);
 }
@@ -200,23 +269,17 @@ void tud_umount_cb(void)
 // Clock source requests
 //--------------------------------------------------------------------+
 
-static bool clock_get_request(uint8_t rhport, audio_control_request_t const *req)
+static bool clock_get_request(uint8_t rhport, tusb_control_request_t const *p_req,
+                              uint8_t selector)
 {
-    tusb_control_request_t const *p_req = (tusb_control_request_t const *) req;
-
-    // Clock source controls are not per channel (UAC2 5.2.5.1).
-    if (req->bChannelNumber != 0) {
-        return false;
-    }
-
-    if (req->bControlSelector == AUDIO_CS_CTRL_SAM_FREQ) {
-        if (req->bRequest == AUDIO_CS_REQ_CUR) {
-            audio_control_cur_4_t cur = {
+    if (selector == AUDIO20_CS_CTRL_SAM_FREQ) {
+        if (p_req->bRequest == AUDIO20_CS_REQ_CUR) {
+            audio20_control_cur_4_t cur = {
                 .bCur = (int32_t) tu_htole32(s.sample_rate),
             };
             return tud_audio_buffer_and_schedule_control_xfer(rhport, p_req, &cur, sizeof(cur));
         }
-        if (req->bRequest == AUDIO_CS_REQ_RANGE) {
+        if (p_req->bRequest == AUDIO20_CS_REQ_RANGE) {
             // Hosts may first ask for 2 bytes (wNumSubRanges); the control
             // layer truncates the full reply to wLength.
             rate_range_t range;
@@ -231,56 +294,47 @@ static bool clock_get_request(uint8_t rhport, audio_control_request_t const *req
         return false;
     }
 
-    if (req->bControlSelector == AUDIO_CS_CTRL_CLK_VALID &&
-        req->bRequest == AUDIO_CS_REQ_CUR) {
-        audio_control_cur_1_t valid = { .bCur = 1 };
+    if (selector == AUDIO20_CS_CTRL_CLK_VALID && p_req->bRequest == AUDIO20_CS_REQ_CUR) {
+        audio20_control_cur_1_t valid = { .bCur = 1 };
         return tud_audio_buffer_and_schedule_control_xfer(rhport, p_req, &valid, sizeof(valid));
     }
 
     return false;
 }
 
-static bool clock_set_request(audio_control_request_t const *req, uint8_t const *buf)
+static bool clock_set_request(tusb_control_request_t const *p_req, uint8_t selector,
+                              uint8_t const *buf)
 {
-    if (req->bChannelNumber != 0 ||
-        req->bControlSelector != AUDIO_CS_CTRL_SAM_FREQ ||
-        req->bRequest != AUDIO_CS_REQ_CUR ||
-        req->wLength != sizeof(audio_control_cur_4_t)) {
+    if (selector != AUDIO20_CS_CTRL_SAM_FREQ ||
+        p_req->bRequest != AUDIO20_CS_REQ_CUR ||
+        p_req->wLength != sizeof(audio20_control_cur_4_t)) {
         return false;
     }
 
     uint32_t const rate = tu_le32toh(tu_unaligned_read32(buf));
 
-    if (!rate_supported(rate)) {
-        s.stats.rate_rejects++;
-        return false;
-    }
-
     // Hosts re-send the current rate before every stream start.
     // TinyUSB only reads the feedback parameters at SET_INTERFACE, so a rate
     // change while streaming keeps the old feedback clamp until the stream
     // restarts. Windows, Linux and Apple change the rate with the stream closed.
-    if (rate != s.sample_rate) {
-        s.sample_rate = rate;
-        s.stats.rate_changes++;
-        raise_event(USB_AUDIO_EVT_RATE_CHANGED);
-    }
-    return true;
+    return set_sample_rate(rate);
 }
 
 //--------------------------------------------------------------------+
 // Audio class callbacks
 //--------------------------------------------------------------------+
 
-// Only the clock source has controls; everything else is STALLed.
+// Only the clock source has controls; everything else is STALLed. Clock
+// source controls are not per channel (UAC2 5.2.5.1).
 bool tud_audio_get_req_entity_cb(uint8_t rhport, tusb_control_request_t const *p_request)
 {
-    audio_control_request_t const *req = (audio_control_request_t const *) p_request;
+    uint16_t const value  = tu_le16toh(p_request->wValue);
+    uint8_t const  entity = TU_U16_HIGH(tu_le16toh(p_request->wIndex));
     diag_mark(DIAG_MARK_CLOCK_REQ);
     diag_cnt.clock_req++;
 
-    if (req->bEntityID == UAC2_ENTITY_CLOCK) {
-        return clock_get_request(rhport, req);
+    if (s.mode == USB_AUDIO_MODE_UAC2 && entity == UAC2_ENTITY_CLOCK && TU_U16_LOW(value) == 0) {
+        return clock_get_request(rhport, p_request, TU_U16_HIGH(value));
     }
     return false;
 }
@@ -288,48 +342,61 @@ bool tud_audio_get_req_entity_cb(uint8_t rhport, tusb_control_request_t const *p
 bool tud_audio_set_req_entity_cb(uint8_t rhport, tusb_control_request_t const *p_request, uint8_t *buf)
 {
     (void) rhport;
-    audio_control_request_t const *req = (audio_control_request_t const *) p_request;
+    uint16_t const value  = tu_le16toh(p_request->wValue);
+    uint8_t const  entity = TU_U16_HIGH(tu_le16toh(p_request->wIndex));
     diag_mark(DIAG_MARK_CLOCK_REQ);
     diag_cnt.clock_req++;
 
-    if (req->bEntityID == UAC2_ENTITY_CLOCK) {
-        return clock_set_request(req, buf);
+    if (s.mode == USB_AUDIO_MODE_UAC2 && entity == UAC2_ENTITY_CLOCK && TU_U16_LOW(value) == 0) {
+        return clock_set_request(p_request, TU_U16_HIGH(value), buf);
     }
     return false;
 }
 
-// Workaround for TinyUSB 0.18 on RP2040/RP2350: usbd_edpt_close() is a no-op
-// for ISO endpoints, so a closed stream leaves the OUT endpoint armed and the
-// next stream open panics ("ep 01 was already available"). Abort and clear
-// both streaming endpoints in hardware when the stream closes.
-static void iso_endpoints_disarm(void)
+// UAC1: the data endpoint's sampling frequency control, 3 bytes. Hosts
+// usually send it after selecting alt 1, so the rate can change on an open
+// stream (the pipeline then restarts it); some repeat it, some never send it.
+static bool uac1_rate_request(tusb_control_request_t const *p_request, uint8_t req)
 {
-    uint8_t const ep_num = EPNUM_AUDIO_OUT & 0x0Fu;
-    TU_VERIFY_STATIC((EPNUM_AUDIO_OUT & 0x0Fu) == 1 && (EPNUM_AUDIO_FB & 0x0Fu) == 1,
-                     "abort bits below assume both streaming endpoints are EP1");
-    uint32_t const mask = USB_EP_ABORT_EP1_OUT_BITS | USB_EP_ABORT_EP1_IN_BITS;
-
-    hw_set_bits(&usb_hw->abort, mask);
-    while ((usb_hw->abort_done & mask) != mask) {
-        tight_loop_contents();
+    if (s.mode != USB_AUDIO_MODE_UAC1) {
+        return false;       // UAC2 has no endpoint controls
     }
-    usb_dpram->ep_buf_ctrl[ep_num].out = 0;
-    usb_dpram->ep_buf_ctrl[ep_num].in  = 0;
-    usb_hw->abort_done = mask;                  // write-1-to-clear
-    hw_clear_bits(&usb_hw->abort, mask);
+    diag_mark(DIAG_MARK_CLOCK_REQ);
+    diag_cnt.clock_req++;
+    // A GET reply is truncated to wLength by the control layer.
+    return TU_U16_LOW(tu_le16toh(p_request->wIndex)) == EPNUM_AUDIO_OUT &&
+           TU_U16_HIGH(tu_le16toh(p_request->wValue)) == AUDIO10_EP_CTRL_SAMPLING_FREQ &&
+           p_request->bRequest == req &&
+           (req == AUDIO10_CS_REQ_GET_CUR || tu_le16toh(p_request->wLength) == 3);
+}
+
+bool tud_audio_get_req_ep_cb(uint8_t rhport, tusb_control_request_t const *p_request)
+{
+    if (!uac1_rate_request(p_request, AUDIO10_CS_REQ_GET_CUR)) {
+        return false;
+    }
+    uint8_t cur[3] = {
+        (uint8_t) s.sample_rate, (uint8_t) (s.sample_rate >> 8), (uint8_t) (s.sample_rate >> 16),
+    };
+    return tud_audio_buffer_and_schedule_control_xfer(rhport, p_request, cur, sizeof(cur));
+}
+
+bool tud_audio_set_req_ep_cb(uint8_t rhport, tusb_control_request_t const *p_request, uint8_t *buf)
+{
+    (void) rhport;
+    if (!uac1_rate_request(p_request, AUDIO10_CS_REQ_SET_CUR)) {
+        return false;
+    }
+    return set_sample_rate((uint32_t) buf[0] | ((uint32_t) buf[1] << 8) | ((uint32_t) buf[2] << 16));
 }
 
 // Called whenever an open stream closes, including a direct switch between
 // the 16- and 24-bit alt settings (tud_audio_set_itf_cb() then follows).
-bool tud_audio_set_itf_close_EP_cb(uint8_t rhport, tusb_control_request_t const *p_request)
+bool tud_audio_set_itf_close_ep_cb(uint8_t rhport, tusb_control_request_t const *p_request)
 {
     (void) rhport;
     uint8_t const itf = tu_u16_low(tu_le16toh(p_request->wIndex));
     diag_mark(DIAG_MARK_CLOSE_EP);
-
-    if (itf == ITF_NUM_AUDIO_STREAMING) {
-        iso_endpoints_disarm();
-    }
 
     if (itf == ITF_NUM_AUDIO_STREAMING && s.stream_alt != AS_ALT_ZERO_BW) {
         s.stream_alt = AS_ALT_ZERO_BW;
@@ -338,8 +405,8 @@ bool tud_audio_set_itf_close_EP_cb(uint8_t rhport, tusb_control_request_t const 
     return true;
 }
 
-// Called after the new alt setting's endpoints are open and before
-// tud_audio_feedback_params_cb().
+// Called after the new alt setting's endpoints are open and armed, and
+// before tud_audio_feedback_params_cb().
 bool tud_audio_set_itf_cb(uint8_t rhport, tusb_control_request_t const *p_request)
 {
     (void) rhport;
@@ -363,6 +430,9 @@ bool tud_audio_set_itf_cb(uint8_t rhport, tusb_control_request_t const *p_reques
         break;
 
     case AS_ALT_24BIT:
+        if (s.mode == USB_AUDIO_MODE_UAC1) {
+            return false;
+        }
         s.resolution    = AUDIO_24BIT_RESOLUTION;
         s.subslot_bytes = AUDIO_24BIT_SUBSLOT;
         break;
@@ -372,63 +442,46 @@ bool tud_audio_set_itf_cb(uint8_t rhport, tusb_control_request_t const *p_reques
     }
 
     s.stream_alt = alt;
+    s.rx_halted  = false;
     raise_event(USB_AUDIO_EVT_STREAM_START);
     diag_mark(DIAG_MARK_SET_ITF_DONE);
     return true;
 }
 
-// Receive path. On RP2350 the driver copies each packet from a linear buffer
-// into the FIFO in tud_task(), so these run in the main loop, between reads.
-// The FIFO is overwritable: a packet that does not fit overwrites the oldest
-// data, and the next read skips to the newest FIFO-depth bytes. Packets and
-// reads are whole frames and the depth is a frame multiple, so frames stay
-// aligned; the lost audio is counted as an overrun.
-
-bool tud_audio_rx_done_pre_read_cb(uint8_t rhport, uint16_t n_bytes_received, uint8_t func_id,
-                                   uint8_t ep_out, uint8_t cur_alt_setting)
+// USB interrupt, after the driver copied the packet into the FIFO and
+// re-armed the endpoint. The FIFO is overwritable: a packet that does not
+// fit overwrites the oldest data, and the next read skips to the newest
+// FIFO-depth bytes. Packets and reads are whole frames and the depth is a
+// frame multiple, so frames stay aligned; the lost audio is counted as an
+// overrun.
+bool tud_audio_rx_done_isr(uint8_t rhport, uint16_t n_bytes_received, uint8_t func_id,
+                           uint8_t ep_out, uint8_t cur_alt_setting)
 {
     (void) rhport;
     (void) func_id;
     (void) ep_out;
-    (void) cur_alt_setting;
 
-    uint32_t const frame = (uint32_t) AUDIO_N_CHANNELS * s.subslot_bytes;
-    // Includes zero-length packets, after which TinyUSB 0.18 does not re-arm
-    // the endpoint (the stream then stalls).
-    if (n_bytes_received == 0 || n_bytes_received % frame != 0) {
+    uint32_t const subslot = (cur_alt_setting == AS_ALT_24BIT) ? AUDIO_24BIT_SUBSLOT
+                                                               : AUDIO_16BIT_SUBSLOT;
+    if (n_bytes_received % (AUDIO_N_CHANNELS * subslot) != 0) {
         s.stats.bad_packets++;
-        s.rx_misaligned = n_bytes_received != 0;
+        s.rx_misaligned = true;
     }
-    // tud_audio_available() saturates at the depth, so a FIFO that is still
-    // overflowed also counts.
-    if ((uint32_t) tud_audio_available() + n_bytes_received > CFG_TUD_AUDIO_FUNC_1_EP_OUT_SW_BUF_SZ) {
+
+    tu_fifo_t const *ff = tud_audio_get_ep_out_ff();
+    uint16_t const used = tu_ff_overflow_count(ff->depth, ff->wr_idx, ff->rd_idx);
+    if (used > ff->depth) {
         s.stats.overruns++;
     }
-    return true;
-}
-
-bool tud_audio_rx_done_post_read_cb(uint8_t rhport, uint16_t n_bytes_received, uint8_t func_id,
-                                    uint8_t ep_out, uint8_t cur_alt_setting)
-{
-    (void) rhport;
-    (void) n_bytes_received;
-    (void) func_id;
-    (void) ep_out;
-    (void) cur_alt_setting;
-
-    if (s.rx_misaligned) {
-        // Frame boundaries are unknown now: start over from the next packet.
-        s.rx_misaligned = false;
-        tud_audio_clear_ep_out_ff();
-    }
-    uint16_t const level = tud_audio_available();
+    uint16_t const level = tu_min16(used, ff->depth);
     if (level > s.stats.fifo_max) {
         s.stats.fifo_max = level;
     }
     return true;
 }
 
-// FIFO_COUNT steers the host so the receive FIFO stays half full.
+// FIFO_COUNT steers the host so the receive FIFO stays half full. UAC2
+// only: the UAC1 descriptors have no feedback endpoint.
 void tud_audio_feedback_params_cb(uint8_t func_id, uint8_t alt_itf, audio_feedback_params_t *feedback_param)
 {
     (void) func_id;
@@ -440,10 +493,30 @@ void tud_audio_feedback_params_cb(uint8_t func_id, uint8_t alt_itf, audio_feedba
     feedback_param->sample_freq = s.sample_rate;
 }
 
-// Full Speed feedback: 10.14 in 3 bytes for Apple hosts, 16.16 in 4 bytes
-// for everyone else (see AUDIO_FB_EP_SIZE).
-bool tud_audio_feedback_format_correction_cb(uint8_t func_id)
+//--------------------------------------------------------------------+
+// Apple feedback format
+//--------------------------------------------------------------------+
+
+// TinyUSB sends UAC2 feedback as 16.16 in 4 bytes, which Windows requires.
+// Apple hosts require 10.14 in 3 bytes on Full Speed (see AUDIO_FB_EP_SIZE),
+// so the feedback transfer is rewritten in place. TinyUSB's own calls to
+// usbd_edpt_xfer() reach this through the linker (--wrap, CMakeLists.txt).
+// Inert in UAC1 mode: EP 0x81 does not exist and usb_host_is_apple() is
+// false. Called from the USB interrupt and from tud_task().
+bool __real_usbd_edpt_xfer(uint8_t rhport, uint8_t ep_addr, uint8_t *buffer,
+                           uint16_t total_bytes, bool is_isr);
+bool __wrap_usbd_edpt_xfer(uint8_t rhport, uint8_t ep_addr, uint8_t *buffer,
+                           uint16_t total_bytes, bool is_isr);
+
+bool __wrap_usbd_edpt_xfer(uint8_t rhport, uint8_t ep_addr, uint8_t *buffer,
+                           uint16_t total_bytes, bool is_isr)
 {
-    (void) func_id;
-    return usb_host_is_apple();
+    if (ep_addr == EPNUM_AUDIO_FB && total_bytes == 4 && usb_host_is_apple()) {
+        uint32_t const fb = tu_le32toh(tu_unaligned_read32(buffer)) >> 2;
+        buffer[0] = (uint8_t) fb;
+        buffer[1] = (uint8_t) (fb >> 8);
+        buffer[2] = (uint8_t) (fb >> 16);
+        total_bytes = AUDIO_FB_EP_SIZE_APPLE;
+    }
+    return __real_usbd_edpt_xfer(rhport, ep_addr, buffer, total_bytes, is_isr);
 }

@@ -18,6 +18,13 @@ cmake_minimum_required(VERSION 3.13)
 set(PICO_BOARD pico2 CACHE STRING "Board type")
 set(PICO_PLATFORM rp2350-arm-s CACHE STRING "Platform")
 
+# TinyUSB from the lib/tinyusb submodule (pinned release) instead of the
+# version bundled with the SDK.
+set(PICO_TINYUSB_PATH ${CMAKE_CURRENT_LIST_DIR}/lib/tinyusb)
+if(NOT EXISTS ${PICO_TINYUSB_PATH}/src/tusb.h)
+    message(FATAL_ERROR "lib/tinyusb is empty: run 'git submodule update --init'")
+endif()
+
 # Pull in the Pico SDK (must happen before project()).
 include(pico_sdk_import.cmake)
 
@@ -30,6 +37,7 @@ pico_sdk_init()
 add_executable(usb2spdif
     src/main.c
     src/app/audio_pipeline.c
+    src/app/clock_servo.c
     src/app/log.c
     src/app/monitor.c
     src/app/status_led.c
@@ -91,8 +99,13 @@ target_compile_definitions(usb2spdif PRIVATE
     PICO_ENABLE_USB_RESET_VIA_BAUD_RATE=0
 )
 
+# Feedback format for Apple hosts (src/usb/usb_audio.c).
+target_link_options(usb2spdif PRIVATE "LINKER:--wrap=usbd_edpt_xfer")
+
 # panic() is recorded by the diagnostics module (src/diag/diag.h).
 target_compile_definitions(usb2spdif PRIVATE PICO_PANIC_FUNCTION=diag_panic)
+# TinyUSB's USB interrupt path in RAM: isochronous transfers are handled there.
+target_compile_definitions(usb2spdif PRIVATE PICO_RP2040_USB_FAST_IRQ=1)
 
 # USB is the audio device, so the console is on UART0.
 pico_enable_stdio_uart(usb2spdif 0)

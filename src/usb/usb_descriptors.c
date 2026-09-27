@@ -1,9 +1,12 @@
 // USB descriptors.
 //
-// Interfaces: 0 Audio Control and 1 Audio Streaming (UAC2, one IAD),
-// 2 picotool reset (vendor). Topology: Clock -> USB streaming Input
-// Terminal -> S/PDIF Output Terminal. The BOS / MS OS 2.0 descriptors come
-// from the SDK's pico_usb_reset.
+// Interfaces: 0 Audio Control and 1 Audio Streaming, 2 picotool reset
+// (vendor). The audio function is chosen at boot (usb_audio_mode()):
+// - UAC2, one IAD. Topology: Clock -> USB streaming Input Terminal ->
+//   S/PDIF Output Terminal.
+// - UAC1, no IAD (the AC header lists the streaming interface), own PID.
+//   Topology: USB streaming Input Terminal -> S/PDIF Output Terminal.
+// The BOS / MS OS 2.0 descriptors come from the SDK's pico_usb_reset.
 
 #include <stddef.h>
 #include <stdint.h>
@@ -12,6 +15,7 @@
 #include "pico/unique_id.h"
 #include "pico/usb_reset.h"
 
+#include "usb/usb_audio.h"
 #include "usb/usb_descriptors.h"
 #include "diag/diag.h"
 #if USB2SPDIF_SELFTEST
@@ -61,11 +65,37 @@ static tusb_desc_device_t const desc_device = {
     .bNumConfigurations = 1,
 };
 
+// No IAD, so a plain composite device (like the PCM2704); Windows groups
+// the audio interfaces through the AC header.
+static tusb_desc_device_t const desc_device_uac1 = {
+    .bLength            = sizeof(tusb_desc_device_t),
+    .bDescriptorType    = TUSB_DESC_DEVICE,
+    .bcdUSB             = USB_BCD_USB_WITH_BOS,
+
+    .bDeviceClass       = TUSB_CLASS_UNSPECIFIED,
+    .bDeviceSubClass    = 0x00,
+    .bDeviceProtocol    = 0x00,
+    .bMaxPacketSize0    = CFG_TUD_ENDPOINT0_SIZE,
+
+    .idVendor           = USB_VID,
+    .idProduct          = USB_PID_UAC1,
+    .bcdDevice          = USB_BCD_DEVICE,
+
+    .iManufacturer      = STRID_MANUFACTURER,
+    .iProduct           = STRID_PRODUCT,
+    .iSerialNumber      = STRID_SERIAL,
+
+    .bNumConfigurations = 1,
+};
+
 static bool host_decided;
 
 uint8_t const *tud_descriptor_device_cb(void)
 {
     host_decided = false;   // enumeration (re)starts
+    if (usb_audio_mode() == USB_AUDIO_MODE_UAC1) {
+        return (uint8_t const *)&desc_device_uac1;
+    }
     return (uint8_t const *)&desc_device;
 }
 
@@ -74,13 +104,13 @@ uint8_t const *tud_descriptor_device_cb(void)
 //--------------------------------------------------------------------+
 
 #define AUDIO_STEREO_CHANNEL_CONFIG \
-    (AUDIO_CHANNEL_CONFIG_FRONT_LEFT | AUDIO_CHANNEL_CONFIG_FRONT_RIGHT)
+    (AUDIO20_CHANNEL_CONFIG_FRONT_LEFT | AUDIO20_CHANNEL_CONFIG_FRONT_RIGHT)
 
-#define AUDIO_FUNCTION_CATEGORY     AUDIO_FUNC_CONVERTER
+#define AUDIO_FUNCTION_CATEGORY     AUDIO20_FUNC_CONVERTER
 
 #define AUDIO_CLOCK_CONTROLS \
-    ((AUDIO_CTRL_RW << AUDIO_CLOCK_SOURCE_CTRL_CLK_FRQ_POS) | \
-     (AUDIO_CTRL_R  << AUDIO_CLOCK_SOURCE_CTRL_CLK_VAL_POS))
+    ((AUDIO20_CTRL_RW << AUDIO20_CLOCK_SOURCE_CTRL_CLK_FRQ_POS) | \
+     (AUDIO20_CTRL_R  << AUDIO20_CLOCK_SOURCE_CTRL_CLK_VAL_POS))
 
 #define AUDIO_NO_ASSOC_TERMINAL     0x00
 
@@ -94,7 +124,7 @@ uint8_t const *tud_descriptor_device_cb(void)
 
 // 96 kHz plus one extra frame for rate adaptation.
 #define AUDIO_EP_SIZE(_subslot) \
-    TUD_AUDIO_EP_SIZE(AUDIO_MAX_SAMPLE_RATE, _subslot, AUDIO_N_CHANNELS)
+    TUD_AUDIO_EP_SIZE(false, AUDIO_MAX_SAMPLE_RATE, _subslot, AUDIO_N_CHANNELS)
 
 TU_VERIFY_STATIC(AUDIO_EP_SIZE(AUDIO_16BIT_SUBSLOT) == 388, "unexpected 16-bit EP size");
 TU_VERIFY_STATIC(AUDIO_EP_SIZE(AUDIO_24BIT_SUBSLOT) == 776, "unexpected 24-bit EP size");
@@ -105,13 +135,13 @@ TU_VERIFY_STATIC(AUDIO_EP_SIZE(AUDIO_24BIT_SUBSLOT) <= 1023, "FS iso packet limi
 // No Feature Unit on purpose: without device volume, the host applies
 // volume in software and exclusive-mode playback stays bit-perfect.
 #define AUDIO_AC_ENTITIES                                                     \
-    TUD_AUDIO_DESC_CLK_SRC(                                                   \
+    TUD_AUDIO20_DESC_CLK_SRC(                                                 \
         /*_clkid*/     UAC2_ENTITY_CLOCK,                                     \
-        /*_attr*/      AUDIO_CLOCK_SOURCE_ATT_INT_PRO_CLK,                    \
+        /*_attr*/      AUDIO20_CLOCK_SOURCE_ATT_INT_PRO_CLK,                  \
         /*_ctrl*/      AUDIO_CLOCK_CONTROLS,                                  \
         /*_assocTerm*/ AUDIO_NO_ASSOC_TERMINAL,                               \
         /*_stridx*/    0x00),                                                 \
-    TUD_AUDIO_DESC_INPUT_TERM(                                                \
+    TUD_AUDIO20_DESC_INPUT_TERM(                                              \
         /*_termid*/           UAC2_ENTITY_INPUT_TERMINAL,                     \
         /*_termtype*/         AUDIO_TERM_TYPE_USB_STREAMING,                  \
         /*_assocTerm*/        AUDIO_NO_ASSOC_TERMINAL,                        \
@@ -119,66 +149,66 @@ TU_VERIFY_STATIC(AUDIO_EP_SIZE(AUDIO_24BIT_SUBSLOT) <= 1023, "FS iso packet limi
         /*_nchannelslogical*/ AUDIO_N_CHANNELS,                               \
         /*_channelcfg*/       AUDIO_STEREO_CHANNEL_CONFIG,                    \
         /*_idxchannelnames*/  0x00,                                           \
-        /*_ctrl*/             AUDIO_CTRL_NONE,                                \
+        /*_ctrl*/             AUDIO20_CTRL_NONE,                              \
         /*_stridx*/           0x00),                                          \
-    TUD_AUDIO_DESC_OUTPUT_TERM(                                               \
+    TUD_AUDIO20_DESC_OUTPUT_TERM(                                             \
         /*_termid*/    UAC2_ENTITY_OUTPUT_TERMINAL,                           \
-        /*_termtype*/  UAC2_TERM_TYPE_EXT_SPDIF,                              \
+        /*_termtype*/  TERM_TYPE_EXT_SPDIF,                                   \
         /*_assocTerm*/ AUDIO_NO_ASSOC_TERMINAL,                               \
         /*_srcid*/     UAC2_ENTITY_INPUT_TERMINAL,                            \
         /*_clkid*/     UAC2_ENTITY_CLOCK,                                     \
-        /*_ctrl*/      AUDIO_CTRL_NONE,                                       \
+        /*_ctrl*/      AUDIO20_CTRL_NONE,                                     \
         /*_stridx*/    0x00)
 
 // A streaming alt setting with data and feedback endpoints.
 #define AUDIO_AS_STREAM_ALT(_alt, _subslot, _resolution, _fbsize)           \
-    TUD_AUDIO_DESC_STD_AS_INT(                                                \
+    TUD_AUDIO20_DESC_STD_AS_INT(                                              \
         /*_itfnum*/ ITF_NUM_AUDIO_STREAMING,                                  \
         /*_altset*/ _alt,                                                     \
         /*_nEPs*/   2,                                                        \
         /*_stridx*/ 0x00),                                                    \
-    TUD_AUDIO_DESC_CS_AS_INT(                                                 \
+    TUD_AUDIO20_DESC_CS_AS_INT(                                               \
         /*_termid*/            UAC2_ENTITY_INPUT_TERMINAL,                    \
-        /*_ctrl*/              AUDIO_CTRL_NONE,                               \
-        /*_formattype*/        AUDIO_FORMAT_TYPE_I,                           \
-        /*_formats*/           AUDIO_DATA_FORMAT_TYPE_I_PCM,                  \
+        /*_ctrl*/              AUDIO20_CTRL_NONE,                             \
+        /*_formattype*/        AUDIO20_FORMAT_TYPE_I,                         \
+        /*_formats*/           AUDIO20_DATA_FORMAT_TYPE_I_PCM,                \
         /*_nchannelsphysical*/ AUDIO_N_CHANNELS,                              \
         /*_channelcfg*/        AUDIO_STEREO_CHANNEL_CONFIG,                   \
         /*_stridx*/            0x00),                                         \
-    TUD_AUDIO_DESC_TYPE_I_FORMAT(_subslot, _resolution),                      \
-    TUD_AUDIO_DESC_STD_AS_ISO_EP(                                             \
+    TUD_AUDIO20_DESC_TYPE_I_FORMAT(_subslot, _resolution),                    \
+    TUD_AUDIO20_DESC_STD_AS_ISO_EP(                                           \
         /*_ep*/        EPNUM_AUDIO_OUT,                                       \
         /*_attr*/      AUDIO_DATA_EP_ATTR,                                    \
         /*_maxEPsize*/ AUDIO_EP_SIZE(_subslot),                               \
         /*_interval*/  AUDIO_EP_INTERVAL_FS),                                 \
     /* Short packets are normal (44/45 frames per ms at 44.1 kHz). */        \
-    TUD_AUDIO_DESC_CS_AS_ISO_EP(                                              \
-        /*_attr*/          AUDIO_CS_AS_ISO_DATA_EP_ATT_NON_MAX_PACKETS_OK,    \
-        /*_ctrl*/          AUDIO_CTRL_NONE,                                   \
-        /*_lockdelayunit*/ AUDIO_CS_AS_ISO_DATA_EP_LOCK_DELAY_UNIT_UNDEFINED, \
+    TUD_AUDIO20_DESC_CS_AS_ISO_EP(                                            \
+        /*_attr*/          AUDIO20_CS_AS_ISO_DATA_EP_ATT_NON_MAX_PACKETS_OK,  \
+        /*_ctrl*/          AUDIO20_CTRL_NONE,                                 \
+        /*_lockdelayunit*/ AUDIO20_CS_AS_ISO_DATA_EP_LOCK_DELAY_UNIT_UNDEFINED, \
         /*_lockdelay*/     0x0000),                                           \
-    TUD_AUDIO_DESC_STD_AS_ISO_FB_EP(                                          \
+    TUD_AUDIO20_DESC_STD_AS_ISO_FB_EP(                                        \
         /*_ep*/       EPNUM_AUDIO_FB,                                         \
         /*_epsize*/   _fbsize,                                                \
         /*_interval*/ AUDIO_EP_INTERVAL_FS)
 
 // _fbsize: AUDIO_FB_EP_SIZE or AUDIO_FB_EP_SIZE_APPLE.
 #define USB2SPDIF_AUDIO_FUNCTION_DESCRIPTOR(_fbsize)                          \
-    TUD_AUDIO_DESC_IAD(                                                       \
+    TUD_AUDIO20_DESC_IAD(                                                     \
         /*_firstitf*/ ITF_NUM_AUDIO_CONTROL,                                  \
         /*_nitfs*/    2,                                                      \
         /*_stridx*/   STRID_AUDIO_FUNCTION),                                  \
-    TUD_AUDIO_DESC_STD_AC(                                                    \
+    TUD_AUDIO20_DESC_STD_AC(                                                  \
         /*_itfnum*/ ITF_NUM_AUDIO_CONTROL,                                    \
         /*_nEPs*/   0,                                                        \
         /*_stridx*/ STRID_AUDIO_FUNCTION),                                    \
-    TUD_AUDIO_DESC_CS_AC(                                                     \
+    TUD_AUDIO20_DESC_CS_AC(                                                   \
         /*_bcdADC*/   0x0200,                                                 \
         /*_category*/ AUDIO_FUNCTION_CATEGORY,                                \
         /*_totallen*/ USB2SPDIF_AC_ENTITIES_LEN,                              \
-        /*_ctrl*/     (AUDIO_CTRL_NONE << AUDIO_CS_AS_INTERFACE_CTRL_LATENCY_POS)), \
+        /*_ctrl*/     (AUDIO20_CTRL_NONE << AUDIO20_CS_AS_INTERFACE_CTRL_LATENCY_POS)), \
     AUDIO_AC_ENTITIES,                                                        \
-    TUD_AUDIO_DESC_STD_AS_INT(                                                \
+    TUD_AUDIO20_DESC_STD_AS_INT(                                              \
         /*_itfnum*/ ITF_NUM_AUDIO_STREAMING,                                  \
         /*_altset*/ AS_ALT_ZERO_BW,                                           \
         /*_nEPs*/   0,                                                        \
@@ -196,6 +226,92 @@ TU_VERIFY_STATIC(sizeof((uint8_t const[]){ USB2SPDIF_AUDIO_FUNCTION_DESCRIPTOR(A
                      == USB2SPDIF_AUDIO_DESC_LEN,
                  "USB2SPDIF_AUDIO_DESC_LEN does not match the audio descriptor block");
 TU_VERIFY_STATIC(USB2SPDIF_AUDIO_DESC_LEN == 178, "unexpected audio block length");
+
+//--------------------------------------------------------------------+
+// UAC1 function
+//--------------------------------------------------------------------+
+
+#define UAC1_STEREO_CHANNEL_CONFIG \
+    (AUDIO10_CHANNEL_CONFIG_LEFT_FRONT | AUDIO10_CHANNEL_CONFIG_RIGHT_FRONT)
+
+// Adaptive: the host sends at its own clock and the output follows it. The
+// sync type also matters to TinyUSB: a UAC1 endpoint without one is taken
+// for a feedback endpoint.
+#define UAC1_DATA_EP_ATTR \
+    ((uint8_t)TUSB_XFER_ISOCHRONOUS | (uint8_t)TUSB_ISO_EP_ATT_ADAPTIVE)
+
+// 48 kHz plus one extra frame (usbaudio.sys expects room for it).
+#define UAC1_EP_SIZE \
+    TUD_AUDIO_EP_SIZE(false, UAC1_MAX_SAMPLE_RATE, AUDIO_16BIT_SUBSLOT, AUDIO_N_CHANNELS)
+
+TU_VERIFY_STATIC(UAC1_EP_SIZE == 196, "unexpected UAC1 EP size");
+TU_VERIFY_STATIC(UAC1_EP_SIZE <= CFG_TUD_AUDIO_FUNC_1_EP_OUT_SZ_MAX,
+                 "UAC1 EP exceeds CFG_TUD_AUDIO_FUNC_1_EP_OUT_SZ_MAX");
+
+#define UAC1_AC_ENTITIES                                                      \
+    TUD_AUDIO10_DESC_INPUT_TERM(                                              \
+        /*_termid*/          UAC1_ENTITY_INPUT_TERMINAL,                      \
+        /*_termtype*/        AUDIO_TERM_TYPE_USB_STREAMING,                   \
+        /*_assocTerm*/       AUDIO_NO_ASSOC_TERMINAL,                         \
+        /*_nchannels*/       AUDIO_N_CHANNELS,                                \
+        /*_channelcfg*/      UAC1_STEREO_CHANNEL_CONFIG,                      \
+        /*_idxchannelnames*/ 0x00,                                            \
+        /*_stridx*/          0x00),                                           \
+    TUD_AUDIO10_DESC_OUTPUT_TERM(                                             \
+        /*_termid*/    UAC1_ENTITY_OUTPUT_TERMINAL,                           \
+        /*_termtype*/  TERM_TYPE_EXT_SPDIF,                                   \
+        /*_assocTerm*/ AUDIO_NO_ASSOC_TERMINAL,                               \
+        /*_srcid*/     UAC1_ENTITY_INPUT_TERMINAL,                            \
+        /*_stridx*/    0x00)
+
+// No Feature Unit, as in UAC2. The rate is set with the endpoint's
+// sampling frequency control (usb_audio.c).
+#define USB2SPDIF_UAC1_AUDIO_FUNCTION_DESCRIPTOR                              \
+    TUD_AUDIO10_DESC_STD_AC(                                                  \
+        /*_itfnum*/ ITF_NUM_AUDIO_CONTROL,                                    \
+        /*_nEPs*/   0,                                                        \
+        /*_stridx*/ STRID_AUDIO_FUNCTION),                                    \
+    TUD_AUDIO10_DESC_CS_AC(                                                   \
+        /*_bcdADC*/   0x0100,                                                 \
+        /*_totallen*/ USB2SPDIF_UAC1_AC_ENTITIES_LEN,                         \
+        /*_itf*/      ITF_NUM_AUDIO_STREAMING),                               \
+    UAC1_AC_ENTITIES,                                                         \
+    TUD_AUDIO10_DESC_STD_AS_INT(                                              \
+        /*_itfnum*/ ITF_NUM_AUDIO_STREAMING,                                  \
+        /*_altset*/ AS_ALT_ZERO_BW,                                           \
+        /*_nEPs*/   0,                                                        \
+        /*_stridx*/ 0x00),                                                    \
+    TUD_AUDIO10_DESC_STD_AS_INT(                                              \
+        /*_itfnum*/ ITF_NUM_AUDIO_STREAMING,                                  \
+        /*_altset*/ AS_ALT_16BIT,                                             \
+        /*_nEPs*/   1,                                                        \
+        /*_stridx*/ 0x00),                                                    \
+    TUD_AUDIO10_DESC_CS_AS_INT(                                               \
+        /*_termid*/     UAC1_ENTITY_INPUT_TERMINAL,                           \
+        /*_delay*/      0x01,                                                 \
+        /*_formattype*/ AUDIO10_DATA_FORMAT_TYPE_I_PCM),                      \
+    TUD_AUDIO10_DESC_TYPE_I_FORMAT(                                           \
+        /*_nrchannels*/    AUDIO_N_CHANNELS,                                  \
+        /*_subframesize*/  AUDIO_16BIT_SUBSLOT,                               \
+        /*_bitresolution*/ AUDIO_16BIT_RESOLUTION,                            \
+        /*_freqs*/         32000, 44100, 48000),                              \
+    TUD_AUDIO10_DESC_STD_AS_ISO_EP(                                           \
+        /*_ep*/        EPNUM_AUDIO_OUT,                                       \
+        /*_attr*/      UAC1_DATA_EP_ATTR,                                     \
+        /*_maxEPsize*/ UAC1_EP_SIZE,                                          \
+        /*_interval*/  AUDIO_EP_INTERVAL_FS,                                  \
+        /*_sync_ep*/   0x00),                                                 \
+    TUD_AUDIO10_DESC_CS_AS_ISO_EP(                                            \
+        /*_attr*/           AUDIO10_CS_AS_ISO_DATA_EP_ATT_SAMPLING_FRQ,       \
+        /*_lockdelayunits*/ AUDIO10_CS_AS_ISO_DATA_EP_LOCK_DELAY_UNIT_UNDEFINED, \
+        /*_lockdelay*/      0x0000)
+
+TU_VERIFY_STATIC(sizeof((uint8_t const[]){ UAC1_AC_ENTITIES }) == USB2SPDIF_UAC1_AC_ENTITIES_LEN,
+                 "UAC1 CS AC wTotalLength does not match the entity descriptors");
+TU_VERIFY_STATIC(sizeof((uint8_t const[]){ USB2SPDIF_UAC1_AUDIO_FUNCTION_DESCRIPTOR })
+                     == USB2SPDIF_UAC1_AUDIO_DESC_LEN,
+                 "USB2SPDIF_UAC1_AUDIO_DESC_LEN does not match the audio descriptor block");
+TU_VERIFY_STATIC(USB2SPDIF_UAC1_AUDIO_DESC_LEN == 97, "unexpected UAC1 audio block length");
 
 //--------------------------------------------------------------------+
 // Configuration descriptor
@@ -232,6 +348,25 @@ TU_VERIFY_STATIC(sizeof(desc_configuration_apple) == CONFIG_TOTAL_LEN,
                  "Apple configuration descriptor length mismatch");
 TU_VERIFY_STATIC(CONFIG_TOTAL_LEN == 196, "unexpected configuration length");
 
+#define CONFIG_TOTAL_LEN_UAC1 \
+    (TUD_CONFIG_DESC_LEN + USB2SPDIF_UAC1_AUDIO_DESC_LEN + TUD_RPI_RESET_DESC_LEN)
+
+static uint8_t const desc_configuration_uac1[] = {
+    TUD_CONFIG_DESCRIPTOR(
+        /*config_num*/ 1,
+        /*_itfcount*/  ITF_NUM_TOTAL,
+        /*_stridx*/    0x00,
+        /*_total_len*/ CONFIG_TOTAL_LEN_UAC1,
+        /*_attribute*/ CONFIG_ATTR_BUS_POWERED,
+        /*_power_ma*/  CONFIG_MAX_POWER_MA),
+    USB2SPDIF_UAC1_AUDIO_FUNCTION_DESCRIPTOR,
+    TUD_RPI_RESET_DESCRIPTOR(ITF_NUM_RESET, STRID_RESET)
+};
+
+TU_VERIFY_STATIC(sizeof(desc_configuration_uac1) == CONFIG_TOTAL_LEN_UAC1,
+                 "UAC1 configuration descriptor length mismatch");
+TU_VERIFY_STATIC(CONFIG_TOTAL_LEN_UAC1 == 115, "unexpected UAC1 configuration length");
+
 //--------------------------------------------------------------------+
 // Host detection
 //--------------------------------------------------------------------+
@@ -260,12 +395,15 @@ static void host_note_request(host_guess_t if_first)
 
 bool usb_host_is_apple(void)
 {
-    return host_guess == HOST_APPLE;
+    return host_guess == HOST_APPLE && usb_audio_mode() == USB_AUDIO_MODE_UAC2;
 }
 
 uint8_t const *tud_descriptor_configuration_cb(uint8_t index)
 {
     (void)index;
+    if (usb_audio_mode() == USB_AUDIO_MODE_UAC1) {
+        return desc_configuration_uac1;
+    }
     host_note_request(HOST_OTHER);
     return usb_host_is_apple() ? desc_configuration_apple : desc_configuration;
 }
@@ -294,6 +432,7 @@ static char const *const string_table[STRID_COUNT] = {
 
 TU_VERIFY_STATIC(sizeof(USB_MANUFACTURER_STR) - 1 <= STRING_MAX_CHARS, "manufacturer string too long");
 TU_VERIFY_STATIC(sizeof(USB_PRODUCT_STR) - 1 <= STRING_MAX_CHARS, "product string too long");
+TU_VERIFY_STATIC(sizeof(USB_PRODUCT_STR_UAC1) - 1 <= STRING_MAX_CHARS, "UAC1 product string too long");
 TU_VERIFY_STATIC(sizeof(serial_str) - 1 <= STRING_MAX_CHARS, "serial string too long");
 
 // Static: TinyUSB sends it after the callback returns.
@@ -320,7 +459,9 @@ uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid)
 
     size_t chr_count;
 
-    host_note_request(HOST_APPLE);
+    if (usb_audio_mode() == USB_AUDIO_MODE_UAC2) {
+        host_note_request(HOST_APPLE);
+    }
 
     if (index == STRID_DIAG) {
         return hidden_string_desc(diag_string());
@@ -345,6 +486,9 @@ uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid)
         }
 
         char const *str = string_table[index];
+        if (index == STRID_PRODUCT && usb_audio_mode() == USB_AUDIO_MODE_UAC1) {
+            str = USB_PRODUCT_STR_UAC1;
+        }
         chr_count = 0;
         while (chr_count < STRING_MAX_CHARS && str[chr_count] != '\0') {
             desc_str[1 + chr_count] = (uint8_t)str[chr_count];

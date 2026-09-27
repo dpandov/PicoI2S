@@ -15,7 +15,8 @@ Output fields:
     pc / lr     (after a crash) code address of the panic message, fault or hang
     |           everything after the last "| " is the application status:
     D/I/S       link state: detached, idle, streaming
-    a/o         host detected as Apple (3-byte 10.14 feedback) or other
+    a/o/1       UAC2 mode: host detected as Apple (3-byte 10.14 feedback) or
+                other; 1: UAC1 mode (mode pin GP5 grounded, PID 0x0002)
     rate/bits   current stream format
     ff<N>       receive FIFO level in bytes (depth 9312, held half full)
     ur<N>       underruns: output ring ran dry while playing
@@ -28,9 +29,18 @@ Output fields:
     fmax<N>     highest receive FIFO level in bytes
     lp<us>      longest main-loop iteration in microseconds
                 (~1000 at 96 kHz loses a USB packet)
+    tr<ppm>L/U  UAC1 mode only: S/PDIF rate trim in ppm, the adaptive clock
+                following the host: +186 (32/48 kHz) or +344 (44.1 kHz) to
+                cancel the PLL error, plus the host clock offset against the
+                Pico crystal. L = clock servo locked, U = acquiring or not
+                playing
     ur, ov, lt and rmin count from the start of the current or last stream
     (open or format change); fmax and lp from when it began playing, so the
-    start-up (pre-roll, clock switch) is excluded. Counters stop at 999999.
+    start-up (pre-roll, clock switch) is excluded. Counters stop at 999999
+    (99999 in UAC1 mode).
+
+    e.g. UAC2:  So 48000/24 ff4712 ur0 run1 led1 tx48000 ov0 lt0 rmin144 fmax5240 lp212
+         UAC1:  S1 44100/16 ff4935 ur0 run1 led1 tx44100 ov0 lt0 rmin144 fmax5400 lp212 tr361L
 """
 import sys
 import time
@@ -39,13 +49,15 @@ import libusb_package
 import usb.core
 import usb.util
 
-VID, PID = 0x1209, 0x0001
+VID = 0x1209
+PIDS = {0x0001: "UAC2", 0x0002: "UAC1"}
 STRID_DIAG = 0x20
 LANGID_EN_US = 0x0409
 
 
 def read_diag(backend, index=STRID_DIAG):
-    dev = usb.core.find(idVendor=VID, idProduct=PID, backend=backend)
+    dev = usb.core.find(idVendor=VID, backend=backend,
+                        custom_match=lambda d: d.idProduct in PIDS)
     if dev is None:
         return "<device not found>"
     try:

@@ -2,7 +2,9 @@
 //
 // The main loop moves PCM from the USB receive FIFO into a ring of 32-bit
 // left-justified stereo frames; the S/PDIF DMA interrupt drains the ring at
-// the transmitter's rate. The USB feedback keeps the receive FIFO half full.
+// the transmitter's rate. The receive FIFO is held half full: in UAC2 mode
+// by the USB feedback, in UAC1 mode (adaptive) by trimming the transmitter
+// rate to the host's (app/clock_servo.h).
 //
 // The output starts when a stream has pre-filled, and stops (pin idle) after
 // 3 s without audio samples: stream closed, or open with nothing arriving.
@@ -24,12 +26,16 @@ typedef struct {
     // Since boot.
     uint32_t underruns_total;
     uint32_t overruns_total;
+    // Now.
+    int32_t  trim_ppb;        // transmitter rate trim (0 in UAC2 mode)
+    bool     clock_locked;    // UAC1: playing and the clock servo locked
 } audio_pipeline_stats_t;
 
 // Call after spdif_tx_init().
 void audio_pipeline_init(void);
 
-// Call every main-loop iteration, after tud_task().
+// Call every main-loop iteration, after tud_task(). Also applies the
+// transmitter rate trim (spdif_tx_trim_task()).
 void audio_pipeline_task(void);
 
 // Stream samples are going out (pre-roll done, no underrun since).

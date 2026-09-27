@@ -1,6 +1,7 @@
 // usb2spdif - USB to S/PDIF bridge for the Raspberry Pi Pico 2.
 
 #include "pico/stdlib.h"
+#include "hardware/gpio.h"
 #include "tusb.h"
 #include "board_config.h"
 #include "app/audio_pipeline.h"
@@ -15,6 +16,17 @@
 #if USB2SPDIF_SELFTEST
 #include "selftest/selftest.h"
 #endif
+
+// The internal pull-up (about 50 kOhm) charges the pad and a jumper wire
+// (tens of pF) within a few us.
+#define MODE_PIN_SETTLE_US 50u
+
+static usb_audio_mode_t read_mode_pin(void) {
+    gpio_init(UAC_MODE_PIN);
+    gpio_pull_up(UAC_MODE_PIN);
+    busy_wait_us_32(MODE_PIN_SETTLE_US);
+    return gpio_get(UAC_MODE_PIN) ? USB_AUDIO_MODE_UAC2 : USB_AUDIO_MODE_UAC1;
+}
 
 int main(void) {
     // First: diag_init() derives its SysTick period from clk_sys.
@@ -33,7 +45,7 @@ int main(void) {
     audio_pipeline_init();
 #endif
 
-    usb_audio_init();
+    usb_audio_init(read_mode_pin());
     const tusb_rhport_init_t dev_init = {
         .role  = TUSB_ROLE_DEVICE,
         .speed = TUSB_SPEED_FULL,
