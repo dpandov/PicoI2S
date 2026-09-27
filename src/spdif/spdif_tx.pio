@@ -1,0 +1,8 @@
+; S/PDIF cell output: one pre-encoded biphase-mark cell per clock cycle.
+; Configure: OUT pin = S/PDIF pin, shift left (MSB first), autopull at 32,
+; joined TX FIFO, clock = 128 x sample rate.
+
+.program spdif_tx
+.wrap_target
+    out pins, 1
+.wrap

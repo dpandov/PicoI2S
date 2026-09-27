@@ -17,10 +17,11 @@ Output fields:
     D/I/S       link state: detached, idle, streaming
     a/o         host detected as Apple (3-byte 10.14 feedback) or other
     rate/bits   current stream format
-    ff<a>/<b>   receive FIFO level / depth in bytes
-    ur<N>       sink underruns
-    run0/1      sink running (audio flowing)
+    ff<N>       receive FIFO level in bytes (depth 6208, held half full)
+    ur<N>       pipeline underruns (output ring ran dry while playing)
+    run0/1      stream samples going out on S/PDIF
     led0/1      onboard LED state
+    tx<Hz>      S/PDIF output sample rate, 0 when the output is stopped
 """
 import sys
 import time

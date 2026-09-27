@@ -181,6 +181,10 @@ void diag_init(void) {
     watchdog_enable(DIAG_WATCHDOG_MS, true);
 }
 
+void diag_clock_changed(void) {
+    systick_start();
+}
+
 static bool in_flash(uint32_t p) {
     return p >= 0x10000000u && p < 0x10400000u;
 }

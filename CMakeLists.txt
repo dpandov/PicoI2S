@@ -29,23 +29,38 @@ pico_sdk_init()
 
 add_executable(usb2spdif
     src/main.c
-    src/app/audio_sink.c
+    src/app/audio_pipeline.c
     src/app/monitor.c
     src/app/status_led.c
+    src/app/test_tone.c
+    src/clock/audio_clock.c
     src/diag/diag.c
+    src/spdif/spdif_encode.c
+    src/spdif/spdif_tx.c
     src/usb/usb_audio.c
     src/usb/usb_descriptors.c
 )
 
+pico_generate_pio_header(usb2spdif ${CMAKE_CURRENT_LIST_DIR}/src/spdif/spdif_tx.pio)
+
 # Includes are written relative to src/ (e.g. "usb/usb_audio.h").
 # TinyUSB includes tusb_config.h by bare name, hence src/usb.
 target_include_directories(usb2spdif PRIVATE src src/usb)
+
+# Outputs a 1 kHz, -18 dBFS test tone at 48 kHz from boot, without a host,
+# to check the wiring and receiver lock.
+option(USB2SPDIF_TEST_TONE "Output a 1 kHz test tone on S/PDIF" OFF)
+if(USB2SPDIF_TEST_TONE)
+    target_compile_definitions(usb2spdif PRIVATE USB2SPDIF_TEST_TONE=1)
+endif()
 
 target_link_libraries(usb2spdif
     pico_stdlib
     pico_unique_id
     hardware_clocks
     hardware_watchdog
+    hardware_pio
+    hardware_dma
     tinyusb_device
     pico_usb_reset
 )

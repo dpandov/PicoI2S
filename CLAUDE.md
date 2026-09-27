@@ -70,7 +70,7 @@ generated analysis go in `scratch/` at the repository root. This folder and
   - `src/main.c`: init and main loop only. `src/board_config.h`: pins.
   - `src/usb/`: descriptors, UAC2 class callbacks, `tusb_config.h`. All
     `tud_*` callbacks live here.
-  - `src/app/`: application behaviour (audio sink / pipeline, status LED,
+  - `src/app/`: application behaviour (audio pipeline, status LED,
     console and diagnostic status line).
   - `src/diag/`: crash and hang diagnostics.
   - `src/spdif/`: S/PDIF transmitter (PIO program, DMA, subframe builder).
@@ -92,11 +92,48 @@ generated analysis go in `scratch/` at the repository root. This folder and
 2. UAC2 descriptors from the TinyUSB `uac2_speaker_fb` example. Goal: device
    enumerates on Windows and Linux with the right rates and formats. (done on
    Windows; Linux not yet tested)
-3. S/PDIF PIO program plus DMA double buffer, first with a generated test
-   tone at 48 kHz. Verify lock on a real receiver. Includes the 3-second
-   silence-then-stop behaviour when audio stops.
-4. Connect USB FIFO to subframe builder. Feedback via FIFO fill level.
-5. Sample-rate and format switching, PLL family switch, channel status.
+3. Phase A: S/PDIF transmitter module (`src/spdif/`), brought up with the
+   test tone at 48 kHz. Verify lock on the receiver. (done)
+   - BMC encoding on the CPU (table lookup, line-level tracking; preambles
+     are constants thanks to even parity). PIO program is `out pins, 1` at
+     the cell rate (128 x Fs).
+   - clk_sys 147.43 MHz (PLL 12 MHz x 86 / 7 / 1) for the 48 kHz family,
+     so the PIO divider is an integer (36 / 24 / 12). 44.1 kHz family comes
+     in phase B.
+   - Two chained DMA channels over two 96-frame buffers; the completion IRQ
+     re-encodes the finished buffer. Frame counter mod 192 drives the block
+     preamble and channel status.
+   - Channel status: consumer, PCM, copy permitted, category general, no
+     pre-emphasis, rate code and word length from the stream format.
+     V = U = 0.
+   - API: `spdif_tx_init(pin)`, `spdif_tx_start(rate, bits)`,
+     `spdif_tx_stop()`, source callback delivering 32-bit left-justified
+     stereo samples; silence when the source has none. Stopped = pin low.
+   - Test tone: permanent CMake option `USB2SPDIF_TEST_TONE` (default OFF):
+     1 kHz at -18 dBFS, both channels, 48 kHz / 24-bit, no host needed.
+     Integer table (48 samples per period), no floating point at runtime.
+   - Receiver available has a lock indicator only (no rate display). If it
+     does not lock, verify with a scratch-only PIO self-check: a second SM
+     reads the pin back and decodes it; results go to the diagnostic string.
+4. Phase B: replace the audio sink with the S/PDIF pipeline, 3-second
+   silence-then-stop (timer starts on stream close or on a stall: stream
+   open but no samples arriving), PLL family switch for 44.1 / 88.2 kHz,
+   channel status per rate and word length. (done: bit-exact on the line
+   at all rates and depths, receiver lock verified with Windows and iPad)
+   - Data path: the main loop moves PCM from the TinyUSB FIFO into a small
+     ring of 32-bit frames (topped up to a fixed target); the DMA IRQ
+     drains the ring. The IRQ must never read the TinyUSB FIFO: the driver
+     clears it before calling the close callback.
+   - One stop rule: output stops 3 s after the last stream sample entered
+     the ring. Covers both stream close and stall.
+   - Stream start: pre-roll to half FIFO, then start the output (switching
+     the PLL family first if needed). Same rate, other word length: update
+     the channel status in place. Other rate: stop, switch, restart.
+   - Verification without a receiver: a scratch-only build of the real
+     firmware decodes the pin on core 1 (a second PIO SM samples it) while
+     the PC plays a test pattern; injected with `ld --wrap`, no hooks in
+     `src/`.
+5. (merged into phase B)
 6. Robustness (underrun / overrun), long-run soak test.
 
 ## Known TinyUSB issues (0.18, SDK 2.3.1)
@@ -120,9 +157,14 @@ generated analysis go in `scratch/` at the repository root. This folder and
   request after the device descriptor) and serves a second configuration;
   `tud_audio_feedback_format_correction_cb()` switches the value format.
   The diagnostic string shows the guess (`a` / `o`).
-- To prove a host follows the feedback, temporarily make the sink consume
-  a few thousand ppm fast or slow in a scratch build: the FIFO must stay
-  stable with no underruns. Do not commit such test code.
+- PortAudio's WASAPI exclusive mode (used by `sounddevice`) is not
+  bit-exact: it keeps replaying one stale half of its buffer (624-frame
+  chunks at 48 kHz). A 1 kHz tone hides this, so `tools/stream_test.py`
+  still works, but bit-exact tests must use a native WASAPI exclusive
+  (event-driven) player, which delivers the samples unchanged.
+- To prove a host follows the feedback, temporarily make the output consume
+  a few thousand ppm fast or slow in a scratch build (e.g. a fractional
+  PIO divider): the FIFO must stay stable with no underruns. Do not commit such test code.
 
 ## Git rules
 

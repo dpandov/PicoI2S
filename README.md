@@ -62,8 +62,8 @@ firmware is unchanged.
 ## Architecture
 
 ```
-USB host --iso OUT--> TinyUSB UAC2 --FIFO--> subframe builder --DMA--> PIO (BMC) --> GPIO --> Toslink
-              <--feedback EP--   (buffer fill level)
+USB host --iso OUT--> TinyUSB FIFO --main loop--> PCM ring --DMA IRQ: BMC encode--> DMA --> PIO --> GPIO --> Toslink
+         <--feedback EP-- (FIFO fill level)
 ```
 
 - **USB**: UAC2, two alternate settings (16-bit and 24-bit stereo), sample
@@ -78,10 +78,13 @@ USB host --iso OUT--> TinyUSB UAC2 --FIFO--> subframe builder --DMA--> PIO (BMC)
   | 48k (32, 48, 96) | 147.4286 MHz | 86 / 7x1 | -186 ppm |
   | 44.1k (44.1, 88.2) | 135.4286 MHz | 79 / 7x1 | -344 ppm |
 
-- **S/PDIF**: a PIO state machine performs biphase-mark encoding at 128 x Fs
-  cells per second. The CPU builds 32-bit subframes (preamble, 24-bit
-  left-justified sample, V/U/C/P bits) into a double buffer that DMA streams
-  into the PIO FIFO.
+- **S/PDIF**: the CPU biphase-mark encodes each frame (preamble, 24-bit
+  sample, V/U/C/P bits) into 128 line cells with a table lookup; a PIO state
+  machine shifts the cells out at 128 x Fs. Two DMA channels ping-pong over
+  two 96-frame buffers, and each completion interrupt re-encodes the finished
+  buffer from a small PCM ring that the main loop fills from the USB FIFO.
+  Channel status: consumer, PCM, copy permitted, rate and word length of the
+  stream.
 - **Idle behaviour**: when the host stops streaming, silence is transmitted
   for 3 seconds so the receiver stays locked across track changes and short
   pauses. After 3 seconds without audio the S/PDIF output stops (line held
@@ -95,13 +98,13 @@ src/
   main.c            init and main loop
   board_config.h    pin assignments
   usb/              USB descriptors, UAC2 class, TinyUSB config
-  app/              audio sink, status LED, console / diagnostic status
+  app/              audio pipeline, status LED, console / diagnostic status,
+                    test tone
+  spdif/            S/PDIF encoder, PIO program, DMA driver
+  clock/            system PLL per sample-rate family
   diag/             crash and hang diagnostics
 tools/              host-side test and diagnostic scripts
 ```
-
-The S/PDIF transmitter (`src/spdif/`) and sample-rate clock switching
-(`src/clock/`) will get their own folders.
 
 ## Toolchain
 
@@ -121,6 +124,10 @@ Pico extension; it installs the SDK and toolchain and generates the
 cmake -S . -B build -G Ninja -DPICO_BOARD=pico2
 cmake --build build
 ```
+
+To check the wiring and a receiver without a USB host, build with
+`-DUSB2SPDIF_TEST_TONE=ON`: the output then carries a 1 kHz tone at -18 dBFS
+(48 kHz / 24-bit) from power-up.
 
 ## Flashing
 
@@ -143,7 +150,8 @@ Host tools in `tools/` (`pip install -r tools/requirements.txt`):
 
 - `tools/stream_test.py` plays a tone at every rate and bit depth in WASAPI
   exclusive mode and checks, through the device's diagnostic string, that the
-  device runs the requested format with a stable buffer and no underruns.
+  device runs the requested format with no underruns and the S/PDIF output at
+  the stream rate, and that the output stops 3 s after playback ends.
 - `tools/diag.py` reads the diagnostic string: previous-boot crash record
   (panic, fault or hang location) and live stream status. This works without
   a debug probe or UART.
@@ -152,15 +160,20 @@ Host tools in `tools/` (`pip install -r tools/requirements.txt`):
 
 - Step 1, bring-up: done.
 - Step 2, UAC2 device: done. Enumerates on Windows 11, all 5 rates x 2 bit
-  depths stream correctly, feedback holds the buffer at half full. Audio is
-  consumed by a placeholder sink; S/PDIF output comes in step 3.
+  depths stream correctly, feedback holds the buffer at half full. Verified
+  on iPad and iPhone.
+- Step 3, S/PDIF output: done on the pin. All 5 rates x 2 bit depths are
+  bit-exact on the S/PDIF line (checked by a test build that decodes its own
+  output), including clock family switches and the 3-second stop. A
+  receiver locks to the output through the FCR684205T; playback verified
+  from Windows and iPad.
 
 Known limitations:
 
 - Apple hosts (macOS, iPadOS, iOS) need the 3-byte 10.14 feedback format,
   which Windows rejects. The device recognises Apple hosts by their
-  enumeration order and serves them a matching configuration. Verified on
-  Windows; Apple devices still to be confirmed.
+  enumeration order and serves them a matching configuration. macOS is
+  untested.
 - Linux is untested.
 - The USB ID 1209:0001 is the pid.codes test ID. A dedicated PID is needed
   before public release.

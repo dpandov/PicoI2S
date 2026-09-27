@@ -15,7 +15,7 @@
 enum {
     DIAG_MARK_BOOT = 1,
     DIAG_MARK_TUD_TASK,
-    DIAG_MARK_SINK,
+    DIAG_MARK_PIPELINE,
     DIAG_MARK_LED,
     DIAG_MARK_LOG,
     DIAG_MARK_SET_ITF,
@@ -37,6 +37,9 @@ extern volatile diag_counters_t diag_cnt;
 // Call first thing in main(). Captures the previous-boot record, then arms
 // the watchdog and the SysTick hang detector.
 void diag_init(void);
+
+// Call after changing clk_sys: restarts the SysTick hang detector.
+void diag_clock_changed(void);
 
 // Call once per main-loop iteration: feeds the watchdog and the heartbeat.
 void diag_loop(void);

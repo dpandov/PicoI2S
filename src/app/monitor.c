@@ -4,9 +4,10 @@
 #include "pico/stdlib.h"
 #include "hardware/clocks.h"
 #include "board_config.h"
-#include "app/audio_sink.h"
+#include "app/audio_pipeline.h"
 #include "app/status_led.h"
 #include "diag/diag.h"
+#include "spdif/spdif_tx.h"
 #include "usb/usb_audio.h"
 #include "usb/usb_descriptors.h"
 
@@ -48,11 +49,11 @@ static void update_diag_status(void) {
     usb_audio_get_stats(&s);
     static const char link_chr[] = {'D', 'I', 'S'};
     char buf[49];
-    snprintf(buf, sizeof(buf), "%c%c %lu/%u ff%u/%u ur%lu run%d led%d",
+    snprintf(buf, sizeof(buf), "%c%c %lu/%u ff%u ur%lu run%d led%d tx%lu",
              link_chr[usb_audio_link_state()], usb_host_is_apple() ? 'a' : 'o',
-             (unsigned long)f.sample_rate, f.resolution, s.fifo_level, s.fifo_depth,
-             (unsigned long)audio_sink_underruns(), audio_sink_running() ? 1 : 0,
-             status_led_is_on() ? 1 : 0);
+             (unsigned long)f.sample_rate, f.resolution, s.fifo_level,
+             (unsigned long)audio_pipeline_underruns(), audio_pipeline_playing() ? 1 : 0,
+             status_led_is_on() ? 1 : 0, (unsigned long)spdif_tx_sample_rate());
     diag_set_app_status(buf);
 }
 
@@ -68,7 +69,7 @@ static void log_stats(void) {
     if (usb_audio_link_state() == USB_AUDIO_STREAMING && last_us != 0) {
         uint32_t bps = (uint32_t)(((uint64_t)(st.rx_bytes - last_rx) * 1000000u) / (now - last_us));
         printf("stat: %lu B/s fifo %u/%u ur %lu\n", (unsigned long)bps,
-               st.fifo_level, st.fifo_depth, (unsigned long)audio_sink_underruns());
+               st.fifo_level, st.fifo_depth, (unsigned long)audio_pipeline_underruns());
     }
     last_us = now;
     last_rx = st.rx_bytes;

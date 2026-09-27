@@ -1,29 +1,30 @@
 // usb2spdif - USB to S/PDIF bridge for the Raspberry Pi Pico 2.
 
 #include "pico/stdlib.h"
-#include "hardware/clocks.h"
 #include "tusb.h"
-#include "app/audio_sink.h"
+#include "board_config.h"
+#include "app/audio_pipeline.h"
 #include "app/monitor.h"
 #include "app/status_led.h"
+#include "app/test_tone.h"
+#include "clock/audio_clock.h"
 #include "diag/diag.h"
+#include "spdif/spdif_tx.h"
 #include "usb/usb_audio.h"
 
-// clk_peri (UART) runs from the fixed 48 MHz USB PLL so the console is not
-// affected when the system PLL is retuned for a sample-rate family.
-static void peri_clock_init(void) {
-    clock_configure(clk_peri,
-                    0,
-                    CLOCKS_CLK_PERI_CTRL_AUXSRC_VALUE_CLKSRC_PLL_USB,
-                    48 * MHZ,
-                    48 * MHZ);
-}
-
 int main(void) {
+    // First: diag_init() derives its SysTick period from clk_sys.
+    audio_clock_set_family(AUDIO_FAMILY_48K);
     diag_init();
-    peri_clock_init();
     monitor_init();
     status_led_init();
+    spdif_tx_init(SPDIF_PIN);
+
+#if USB2SPDIF_TEST_TONE
+    spdif_tx_start(TEST_TONE_SAMPLE_RATE, 24, test_tone_source);
+#else
+    audio_pipeline_init();
+#endif
 
     usb_audio_init();
     const tusb_rhport_init_t dev_init = {
@@ -36,13 +37,18 @@ int main(void) {
         diag_loop();
         diag_mark(DIAG_MARK_TUD_TASK);
         tud_task();
-        diag_mark(DIAG_MARK_SINK);
-        audio_sink_task();
+#if USB2SPDIF_TEST_TONE
+        bool playing = false;
+#else
+        diag_mark(DIAG_MARK_PIPELINE);
+        audio_pipeline_task();
+        bool playing = audio_pipeline_playing();
+#endif
 
         uint32_t ev = usb_audio_take_events();
         bool stream_open = usb_audio_link_state() == USB_AUDIO_STREAMING;
         diag_mark(DIAG_MARK_LED);
-        status_led_task(ev, stream_open, audio_sink_running());
+        status_led_task(ev, stream_open, playing);
         diag_mark(DIAG_MARK_LOG);
         monitor_task(ev);
     }
