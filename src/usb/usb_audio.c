@@ -54,6 +54,7 @@ static struct {
     uint8_t  resolution;      // from the active or last alt setting
     uint8_t  subslot_bytes;
     volatile uint32_t events; // pending USB_AUDIO_EVT_* bits
+    bool     rx_misaligned;   // last packet was not whole frames
     usb_audio_stats_t stats;
 } s;
 
@@ -142,6 +143,11 @@ void usb_audio_get_stats(usb_audio_stats_t *stats)
     *stats = s.stats;
     stats->fifo_level = tud_audio_available();
     stats->fifo_depth = (uint16_t) CFG_TUD_AUDIO_FUNC_1_EP_OUT_SW_BUF_SZ;
+}
+
+void usb_audio_fifo_max_reset(void)
+{
+    s.stats.fifo_max = 0;
 }
 
 uint32_t usb_audio_read(void *dst, uint32_t max_bytes)
@@ -368,6 +374,57 @@ bool tud_audio_set_itf_cb(uint8_t rhport, tusb_control_request_t const *p_reques
     s.stream_alt = alt;
     raise_event(USB_AUDIO_EVT_STREAM_START);
     diag_mark(DIAG_MARK_SET_ITF_DONE);
+    return true;
+}
+
+// Receive path. On RP2350 the driver copies each packet from a linear buffer
+// into the FIFO in tud_task(), so these run in the main loop, between reads.
+// The FIFO is overwritable: a packet that does not fit overwrites the oldest
+// data, and the next read skips to the newest FIFO-depth bytes. Packets and
+// reads are whole frames and the depth is a frame multiple, so frames stay
+// aligned; the lost audio is counted as an overrun.
+
+bool tud_audio_rx_done_pre_read_cb(uint8_t rhport, uint16_t n_bytes_received, uint8_t func_id,
+                                   uint8_t ep_out, uint8_t cur_alt_setting)
+{
+    (void) rhport;
+    (void) func_id;
+    (void) ep_out;
+    (void) cur_alt_setting;
+
+    uint32_t const frame = (uint32_t) AUDIO_N_CHANNELS * s.subslot_bytes;
+    // Includes zero-length packets, after which TinyUSB 0.18 does not re-arm
+    // the endpoint (the stream then stalls).
+    if (n_bytes_received == 0 || n_bytes_received % frame != 0) {
+        s.stats.bad_packets++;
+        s.rx_misaligned = n_bytes_received != 0;
+    }
+    // tud_audio_available() saturates at the depth, so a FIFO that is still
+    // overflowed also counts.
+    if ((uint32_t) tud_audio_available() + n_bytes_received > CFG_TUD_AUDIO_FUNC_1_EP_OUT_SW_BUF_SZ) {
+        s.stats.overruns++;
+    }
+    return true;
+}
+
+bool tud_audio_rx_done_post_read_cb(uint8_t rhport, uint16_t n_bytes_received, uint8_t func_id,
+                                    uint8_t ep_out, uint8_t cur_alt_setting)
+{
+    (void) rhport;
+    (void) n_bytes_received;
+    (void) func_id;
+    (void) ep_out;
+    (void) cur_alt_setting;
+
+    if (s.rx_misaligned) {
+        // Frame boundaries are unknown now: start over from the next packet.
+        s.rx_misaligned = false;
+        tud_audio_clear_ep_out_ff();
+    }
+    uint16_t const level = tud_audio_available();
+    if (level > s.stats.fifo_max) {
+        s.stats.fifo_max = level;
+    }
     return true;
 }
 

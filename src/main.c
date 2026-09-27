@@ -4,6 +4,7 @@
 #include "tusb.h"
 #include "board_config.h"
 #include "app/audio_pipeline.h"
+#include "app/log.h"
 #include "app/monitor.h"
 #include "app/status_led.h"
 #include "app/test_tone.h"
@@ -11,6 +12,9 @@
 #include "diag/diag.h"
 #include "spdif/spdif_tx.h"
 #include "usb/usb_audio.h"
+#if USB2SPDIF_SELFTEST
+#include "selftest/selftest.h"
+#endif
 
 int main(void) {
     // First: diag_init() derives its SysTick period from clk_sys.
@@ -19,6 +23,9 @@ int main(void) {
     monitor_init();
     status_led_init();
     spdif_tx_init(SPDIF_PIN);
+#if USB2SPDIF_SELFTEST
+    selftest_init();
+#endif
 
 #if USB2SPDIF_TEST_TONE
     spdif_tx_start(TEST_TONE_SAMPLE_RATE, 24, test_tone_source);
@@ -51,5 +58,6 @@ int main(void) {
         status_led_task(ev, stream_open, playing);
         diag_mark(DIAG_MARK_LOG);
         monitor_task(ev);
+        log_task();
     }
 }

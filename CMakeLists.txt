@@ -30,6 +30,7 @@ pico_sdk_init()
 add_executable(usb2spdif
     src/main.c
     src/app/audio_pipeline.c
+    src/app/log.c
     src/app/monitor.c
     src/app/status_led.c
     src/app/test_tone.c
@@ -52,6 +53,21 @@ target_include_directories(usb2spdif PRIVATE src src/usb)
 option(USB2SPDIF_TEST_TONE "Output a 1 kHz test tone on S/PDIF" OFF)
 if(USB2SPDIF_TEST_TONE)
     target_compile_definitions(usb2spdif PRIVATE USB2SPDIF_TEST_TONE=1)
+endif()
+
+# Decodes the S/PDIF output on core 1 and reports it as a USB string, for
+# tools/selftest.py (src/selftest/selftest.h). With the test tone, only
+# framing and channel status are checked.
+option(USB2SPDIF_SELFTEST "Check the S/PDIF output on core 1" OFF)
+if(USB2SPDIF_SELFTEST)
+    target_sources(usb2spdif PRIVATE
+        src/selftest/selftest.c
+        src/selftest/selftest_decode.c
+        src/selftest/selftest_report.c
+    )
+    pico_generate_pio_header(usb2spdif ${CMAKE_CURRENT_LIST_DIR}/src/selftest/selftest_capture.pio)
+    target_compile_definitions(usb2spdif PRIVATE USB2SPDIF_SELFTEST=1)
+    target_link_libraries(usb2spdif pico_multicore)
 endif()
 
 target_link_libraries(usb2spdif
@@ -79,7 +95,7 @@ target_compile_definitions(usb2spdif PRIVATE
 target_compile_definitions(usb2spdif PRIVATE PICO_PANIC_FUNCTION=diag_panic)
 
 # USB is the audio device, so the console is on UART0.
-pico_enable_stdio_uart(usb2spdif 1)
+pico_enable_stdio_uart(usb2spdif 0)
 pico_enable_stdio_usb(usb2spdif 0)
 
 pico_add_extra_outputs(usb2spdif)

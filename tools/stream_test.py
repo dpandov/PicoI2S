@@ -4,7 +4,9 @@ stream through the diagnostic string (see tools/diag.py).
 
 A combination passes when, during playback, the device reports streaming at
 the requested rate and resolution, S/PDIF output at the same rate, audio
-playing, LED on and no underruns. The sweep alternates sample-rate families
+playing, LED on, and no underruns or overruns since the stream started. The
+longest main-loop iteration, late S/PDIF interrupts and the lowest ring
+level are reported. The sweep alternates sample-rate families
 and bit depths, so it covers clock switches and word-length changes on a
 running output. After the last combination the output must keep sending
 silence for about 3 s and then stop.
@@ -46,7 +48,7 @@ def tone(rate, bits):
 
 
 def status_fields(status):
-    """'So 48000/24 ff3104 ur0 run1 led1 tx48000' -> dict of fields."""
+    """'So 48000/24 ff4656 ur0 run1 led1 tx48000 ov0 ...' -> dict of fields."""
     tok = status.split()
     f = {"link": tok[0][:1] if tok else "", "format": tok[1] if len(tok) > 1 else ""}
     for t in tok[2:]:
@@ -59,8 +61,8 @@ def status_fields(status):
 def playing_ok(status, rate, bits):
     f = status_fields(status)
     return (f["link"] == "S" and f["format"] == f"{rate}/{bits}" and "ff" in f
-            and f.get("ur") == 0 and f.get("run") == 1 and f.get("led") == 1
-            and f.get("tx") == rate)
+            and f.get("ur") == 0 and f.get("ov") == 0 and f.get("run") == 1
+            and f.get("led") == 1 and f.get("tx") == rate)
 
 
 def sample_after(backend, t0, times):
@@ -75,6 +77,7 @@ def main():
     backend = libusb_package.get_libusb1_backend()
     out = find_output()
     all_ok = True
+    lp_max = 0
     # Rate outer, bits inner: every rate step changes the clock family
     # (32 -> 44.1 -> 48 -> 88.2 -> 96), every bits step keeps the rate.
     for rate in RATES:
@@ -86,7 +89,13 @@ def main():
             sd.wait()
             ok = all(playing_ok(s, rate, bits) for s in samples)
             all_ok &= ok
-            print(f"{rate:6d} Hz {bits}-bit: {'PASS' if ok else 'FAIL'}   {samples[-1]}")
+            fields = [status_fields(s) for s in samples]
+            lp = max(f.get("lp", 0) for f in fields)
+            lt = max(f.get("lt", 0) for f in fields)
+            rmin = min(f.get("rmin", 0) for f in fields)
+            lp_max = max(lp_max, lp)
+            print(f"{rate:6d} Hz {bits}-bit: {'PASS' if ok else 'FAIL'}   "
+                  f"lp {lp} us, lt {lt}, rmin {rmin}   {samples[-1]}")
 
     # 3 s of silence after the stream ends, then no carrier.
     running, stopped = sample_after(backend, time.time(), IDLE_CHECK_AT)
@@ -95,6 +104,7 @@ def main():
           and fs.get("tx") == 0 and fs.get("led") == 0)
     all_ok &= ok
     print(f"idle stop:        {'PASS' if ok else 'FAIL'}   {running}  ->  {stopped}")
+    print(f"longest main-loop iteration while playing: {lp_max} us")
     print("ALL PASS" if all_ok else "SOME FAILED")
     sys.exit(0 if all_ok else 1)
 

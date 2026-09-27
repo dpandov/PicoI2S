@@ -4,13 +4,16 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-// Frames per DMA buffer (two buffers).
+// Frames per DMA buffer. The two buffers together are one channel-status
+// block (SPDIF_BLOCK_FRAMES).
 #define SPDIF_TX_BUFFER_FRAMES 96
 
 // Fills n_frames interleaved L/R samples, 32-bit left-justified (see
 // spdif_encode.h). Must always fill all frames; use zeros for silence.
 // Called from the DMA interrupt (and twice from spdif_tx_start() to
-// pre-fill): keep it short and non-blocking.
+// pre-fill): keep it short and non-blocking. Normally once per buffer
+// played; a late interrupt (see spdif_tx_late_irqs()) skips calls, and in
+// rare cases uses only part of the frames.
 typedef void (*spdif_source_fn)(int32_t *pcm, uint32_t n_frames);
 
 // Claims a PIO state machine and two DMA channels. Pin is driven low.
@@ -34,3 +37,13 @@ uint8_t spdif_tx_word_bits(void);
 // Changes the word length in the channel status without interrupting the
 // output. Returns false if stopped or word_bits is unsupported.
 bool spdif_tx_set_word_bits(uint8_t word_bits);
+
+// Incremented before and after every start, stop and word-length change:
+// odd while the output or its format is changing. For observers on the
+// other core.
+uint32_t spdif_tx_generation(void);
+
+// Late refills since boot: each time the interrupt came too late (or was
+// held off inside) for at least one buffer, which then went out again with
+// its previous content (still valid S/PDIF). Not reset by start or stop.
+uint32_t spdif_tx_late_irqs(void);

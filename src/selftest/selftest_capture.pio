@@ -1,0 +1,9 @@
+; Self-test capture: samples one input pin every clock cycle.
+; Configure: IN base = S/PDIF pin, shift left (earliest sample in bit 31),
+; autopush at 32, joined RX FIFO. The pin is only read, never claimed: it
+; stays with the transmitter's PIO, and every PIO block sees every pad input.
+
+.program selftest_capture
+.wrap_target
+    in pins, 1
+.wrap

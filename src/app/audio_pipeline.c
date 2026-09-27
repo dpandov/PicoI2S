@@ -1,10 +1,9 @@
 #include "app/audio_pipeline.h"
 
-#include <stdio.h>
-
 #include "pico.h"
 #include "pico/time.h"
 
+#include "app/log.h"
 #include "clock/audio_clock.h"
 #include "diag/diag.h"
 #include "spdif/spdif_tx.h"
@@ -15,8 +14,14 @@
 #define RING_FRAMES   512u
 #define RING_MASK     (RING_FRAMES - 1u)
 // Topped up to this level only, so most of the buffering stays in the USB
-// FIFO, where the feedback endpoint regulates it.
-#define RING_TARGET   (4u * SPDIF_TX_BUFFER_FRAMES)
+// FIFO, where the feedback endpoint regulates it. It only has to bridge
+// main-loop stalls: 2 ms at 96 kHz, and at least two DMA buffers. A longer
+// stall loses USB packets anyway (the endpoint is re-armed from tud_task()).
+#define RING_TARGET_MIN  192u
+#define RING_TARGET   (2u * SPDIF_TX_BUFFER_FRAMES > RING_TARGET_MIN ? \
+                       2u * SPDIF_TX_BUFFER_FRAMES : RING_TARGET_MIN)
+// Frames held by the transmitter's two DMA buffers.
+#define DMA_FRAMES    (2u * SPDIF_TX_BUFFER_FRAMES)
 #define READ_FRAMES   SPDIF_TX_BUFFER_FRAMES
 #define IDLE_STOP_US  3000000u
 
@@ -39,9 +44,13 @@ typedef struct {
     uint8_t  bits;
     bool     playing;
     bool     hold;            // output failed to start: wait for the next stream
+    bool     first_play;      // not played yet since the stream started
+    bool     loop_reset;      // reset the loop maximum next iteration
     uint64_t last_audio_us;   // stream samples last moved into the ring
-    uint32_t underruns;
     uint32_t start_failures;
+    uint32_t overruns_base;   // counts when the stream started
+    uint32_t late_irqs_base;
+    audio_pipeline_stats_t st;
 } pipeline_t;
 
 static pipeline_t p;
@@ -126,7 +135,32 @@ static void output_stop(void) {
     spdif_tx_stop();
     ring_flush();
     p.playing = false;
-    printf("spdif: stop\n");
+    log_printf("spdif: stop\n");
+}
+
+// FIFO level that starts playback. The start moves RING_TARGET + DMA_FRAMES
+// out of the FIFO, so waiting for that much above half leaves the FIFO at
+// the feedback's set point and the stream starts with its steady-state
+// buffering. Capped two packets below full: a packet or two may arrive
+// between checks, and a full FIFO overwrites.
+static uint32_t preroll_bytes(const usb_audio_format_t *f, uint32_t depth) {
+    uint32_t frame_bytes = 2u * f->subslot_bytes;
+    uint32_t want = depth / 2u + (RING_TARGET + DMA_FRAMES) * frame_bytes;
+    uint32_t packet = ((f->sample_rate + 999u) / 1000u + 1u) * frame_bytes;
+    uint32_t cap = depth - 2u * packet;
+    return want < cap ? want : cap;
+}
+
+static void stats_reset(void) {
+    usb_audio_stats_t us;
+    usb_audio_get_stats(&us);
+    p.overruns_base = us.overruns;
+    p.late_irqs_base = spdif_tx_late_irqs();
+    p.st.underruns = 0;
+    p.st.ring_min = RING_TARGET;
+    usb_audio_fifo_max_reset();
+    diag_loop_max_reset();
+    p.first_play = true;
 }
 
 // Stream opened, or its format changed while open. Event bits carry no
@@ -136,6 +170,7 @@ static void stream_started(const usb_audio_format_t *f, uint64_t now) {
     p.bits = f->resolution;
     p.playing = false;
     p.hold = false;
+    stats_reset();
     // An opening stream counts as audio, so a running output is not stopped
     // during its pre-roll.
     p.last_audio_us = now;
@@ -157,7 +192,7 @@ static void begin_playing(const usb_audio_format_t *f, uint64_t now) {
         if (fam != audio_clock_current_family()) {
             audio_clock_set_family(fam);
             diag_clock_changed();
-            printf("clock: %s family\n", fam == AUDIO_FAMILY_44K1 ? "44.1k" : "48k");
+            log_printf("clock: %s family\n", fam == AUDIO_FAMILY_44K1 ? "44.1k" : "48k");
         }
     }
     top_up(f, now);
@@ -166,16 +201,33 @@ static void begin_playing(const usb_audio_format_t *f, uint64_t now) {
             p.start_failures++;
             p.hold = true;
             ring_flush();
-            printf("spdif: start %lu failed (%lu)\n", (unsigned long)f->sample_rate,
-                   (unsigned long)p.start_failures);
+            log_printf("spdif: start %lu failed (%lu)\n", (unsigned long)f->sample_rate,
+                       (unsigned long)p.start_failures);
             return;
         }
         top_up(f, now);   // the start pre-filled two buffers from the ring
-        printf("spdif: %lu Hz %u-bit\n", (unsigned long)f->sample_rate, f->resolution);
+        log_printf("spdif: %lu Hz %u-bit\n", (unsigned long)f->sample_rate, f->resolution);
     }
     // After the fill: a flag raised before it is stale.
     ring_short = false;
     p.playing = true;
+    if (p.first_play) {
+        // Keep the start-up (pre-roll peak, clock switch, pre-fill) out of
+        // the maxima. This iteration is only measured at the next
+        // diag_loop(), hence the deferred loop reset.
+        p.first_play = false;
+        usb_audio_fifo_max_reset();
+        p.loop_reset = true;
+    }
+}
+
+static void log_stream_end(void) {
+    audio_pipeline_stats_t st;
+    audio_pipeline_get_stats(&st);
+    log_printf("pipe: end ur%lu ov%lu lt%lu rmin%lu fmax%lu lp%lu\n",
+               (unsigned long)st.underruns, (unsigned long)st.overruns,
+               (unsigned long)st.late_irqs, (unsigned long)st.ring_min,
+               (unsigned long)st.fifo_max, (unsigned long)st.loop_max_us);
 }
 
 void audio_pipeline_init(void) {
@@ -190,7 +242,16 @@ void audio_pipeline_task(void) {
     bool open = usb_audio_link_state() == USB_AUDIO_STREAMING;
     usb_audio_format_t f = usb_audio_format();
 
-    if (open && (!p.open || f.sample_rate != p.rate || f.resolution != p.bits)) {
+    if (p.loop_reset) {
+        p.loop_reset = false;
+        diag_loop_max_reset();
+    }
+
+    bool changed = f.sample_rate != p.rate || f.resolution != p.bits;
+    if (p.open && (!open || changed)) {
+        log_stream_end();
+    }
+    if (open && (!p.open || changed)) {
         stream_started(&f, now);
     }
     p.open = open;
@@ -202,20 +263,28 @@ void audio_pipeline_task(void) {
     if (ring_short) {
         ring_short = false;
         if (p.playing) {
-            p.underruns++;
+            p.st.underruns++;
+            p.st.underruns_total++;
+            p.st.ring_min = 0;
             p.playing = false;
+            log_printf("pipe: underrun (%lu)\n", (unsigned long)p.st.underruns_total);
         }
     }
 
     if (open && !p.playing && !p.hold) {
-        usb_audio_stats_t st;
-        usb_audio_get_stats(&st);
-        if (st.fifo_level >= st.fifo_depth / 2u) {
+        usb_audio_stats_t us;
+        usb_audio_get_stats(&us);
+        if (us.fifo_level >= preroll_bytes(&f, us.fifo_depth)) {
             begin_playing(&f, now);
         }
     }
 
     if (p.playing) {
+        // Lowest point: only the interrupt has run since the last top-up.
+        uint32_t level = ring_wr - ring_rd;
+        if (level < p.st.ring_min) {
+            p.st.ring_min = level;
+        }
         top_up(&f, now);
     }
 
@@ -228,6 +297,13 @@ bool audio_pipeline_playing(void) {
     return p.playing;
 }
 
-uint32_t audio_pipeline_underruns(void) {
-    return p.underruns;
+void audio_pipeline_get_stats(audio_pipeline_stats_t *stats) {
+    usb_audio_stats_t us;
+    usb_audio_get_stats(&us);
+    *stats = p.st;
+    stats->overruns = us.overruns - p.overruns_base;
+    stats->overruns_total = us.overruns;
+    stats->late_irqs = spdif_tx_late_irqs() - p.late_irqs_base;
+    stats->fifo_max = us.fifo_max;
+    stats->loop_max_us = diag_loop_max_us();
 }

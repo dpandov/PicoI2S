@@ -29,7 +29,7 @@ enum {
     DIAG_KIND_WATCHDOG,     // watchdog reset with no other record
 };
 
-// Must exceed the longest blocking UART print.
+// Must exceed the longest legitimate main-loop iteration.
 #define DIAG_HANG_MS        300u
 #define DIAG_WATCHDOG_MS    1000u
 #define SYSTICK_PERIOD_MS   10u
@@ -46,7 +46,9 @@ static struct {
 
 static volatile uint32_t heartbeat;
 static char report[128];
-static char app_status[49];
+static char app_status[96];
+static uint32_t loop_last_us;
+static uint32_t loop_max_us;
 
 void diag_set_app_status(const char *status) {
     strncpy(app_status, status, sizeof(app_status) - 1);
@@ -62,9 +64,22 @@ void diag_mark(uint32_t mark) {
 }
 
 void diag_loop(void) {
+    uint32_t now = time_us_32();
+    if (loop_last_us != 0 && now - loop_last_us > loop_max_us) {
+        loop_max_us = now - loop_last_us;
+    }
+    loop_last_us = now;
     heartbeat++;
     diag_cnt.loops++;
     watchdog_update();
+}
+
+uint32_t diag_loop_max_us(void) {
+    return loop_max_us;
+}
+
+void diag_loop_max_reset(void) {
+    loop_max_us = 0;
 }
 
 //--------------------------------------------------------------------+
@@ -192,12 +207,15 @@ static bool in_flash(uint32_t p) {
 const char *diag_string(void) {
     static const char *const kinds[] = {"none", "panic", "fault", "hang", "wdog"};
     const char *k = prev.kind < 5 ? kinds[prev.kind] : "?";
-    int n = snprintf(report, sizeof(report),
-                     "b%lu prev=%s m%lu pc%08lx lr%08lx | I%lu C%lu | %s",
+    int n;
+    if (prev.kind == DIAG_KIND_NONE) {
+        n = snprintf(report, sizeof(report), "b%lu %s | %s",
+                     (unsigned long)prev.boots, k, app_status);
+    } else {
+        n = snprintf(report, sizeof(report), "b%lu %s m%lu pc%08lx lr%08lx | %s",
                      (unsigned long)prev.boots, k, (unsigned long)prev.mark,
-                     (unsigned long)prev.info, (unsigned long)prev.lr,
-                     (unsigned long)diag_cnt.set_itf,
-                     (unsigned long)diag_cnt.clock_req, app_status);
+                     (unsigned long)prev.info, (unsigned long)prev.lr, app_status);
+    }
     if (prev.kind == DIAG_KIND_PANIC && in_flash(prev.info) && n > 0 &&
         (size_t)n < sizeof(report) - 4) {
         snprintf(report + n, sizeof(report) - (size_t)n, " '%s'", (const char *)prev.info);

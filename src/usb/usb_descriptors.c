@@ -14,6 +14,9 @@
 
 #include "usb/usb_descriptors.h"
 #include "diag/diag.h"
+#if USB2SPDIF_SELFTEST
+#include "selftest/selftest.h"
+#endif
 
 TU_VERIFY_STATIC(ITF_NUM_AUDIO_STREAMING == ITF_NUM_AUDIO_CONTROL + 1,
                  "UAC2 interfaces must be contiguous for the IAD");
@@ -296,20 +299,19 @@ TU_VERIFY_STATIC(sizeof(serial_str) - 1 <= STRING_MAX_CHARS, "serial string too 
 // Static: TinyUSB sends it after the callback returns.
 static uint16_t desc_str[1 + STRING_MAX_CHARS];
 
-// 126 characters is the USB string maximum.
-#define DIAG_STRING_MAX_CHARS   126
-static uint16_t diag_desc_str[1 + DIAG_STRING_MAX_CHARS];
+// Hidden diagnostic strings, up to 126 characters (the USB string maximum).
+#define HIDDEN_STRING_MAX_CHARS 126
+static uint16_t hidden_desc_str[1 + HIDDEN_STRING_MAX_CHARS];
 
-static uint16_t const *diag_string_desc(void)
+static uint16_t const *hidden_string_desc(char const *str)
 {
-    char const *str = diag_string();
     size_t n = 0;
-    while (n < DIAG_STRING_MAX_CHARS && str[n] != '\0') {
-        diag_desc_str[1 + n] = (uint8_t)str[n];
+    while (n < HIDDEN_STRING_MAX_CHARS && str[n] != '\0') {
+        hidden_desc_str[1 + n] = (uint8_t)str[n];
         n++;
     }
-    diag_desc_str[0] = (uint16_t)((TUSB_DESC_STRING << 8) | (2 * n + 2));
-    return diag_desc_str;
+    hidden_desc_str[0] = (uint16_t)((TUSB_DESC_STRING << 8) | (2 * n + 2));
+    return hidden_desc_str;
 }
 
 uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid)
@@ -321,8 +323,13 @@ uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid)
     host_note_request(HOST_APPLE);
 
     if (index == STRID_DIAG) {
-        return diag_string_desc();
+        return hidden_string_desc(diag_string());
     }
+#if USB2SPDIF_SELFTEST
+    if (index == STRID_SELFTEST) {
+        return hidden_string_desc(selftest_string());
+    }
+#endif
 
     if (index == STRID_LANGID) {
         desc_str[1] = USB_LANGID_EN_US;

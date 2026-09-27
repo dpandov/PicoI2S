@@ -126,7 +126,9 @@ generated analysis go in `scratch/` at the repository root. This folder and
      clears it before calling the close callback.
    - One stop rule: output stops 3 s after the last stream sample entered
      the ring. Covers both stream close and stall.
-   - Stream start: pre-roll to half FIFO, then start the output (switching
+   - Stream start: pre-roll until the FIFO holds its half-full set point
+     plus what the start pulls out (ring target and two DMA buffers), so
+     the stream starts with steady-state buffering; then start the output (switching
      the PLL family first if needed). Same rate, other word length: update
      the channel status in place. Other rate: stop, switch, restart.
    - Verification without a receiver: a scratch-only build of the real
@@ -134,7 +136,43 @@ generated analysis go in `scratch/` at the repository root. This folder and
      the PC plays a test pattern; injected with `ld --wrap`, no hooks in
      `src/`.
 5. (merged into phase B)
-6. Robustness (underrun / overrun), long-run soak test.
+6. Robustness (underrun / overrun), long-run soak test. (done except the
+   long soak, which runs after step 7)
+   - Late S/PDIF DMA interrupt (> 1 buffer): detect, recover, count.
+   - Main-loop latency: TinyUSB re-arms the ISO OUT endpoint from the main
+     loop, so a stall of ~1 ms at 96 kHz loses a packet. Measure the worst
+     case, report it; UART logging becomes non-blocking.
+   - Pre-roll with real headroom at stream start (24-bit at 96 kHz starts
+     with ~4 ms today).
+   - USB FIFO overrun detection and count. Per-stream counters (underruns,
+     overruns, min ring level, max FIFO level, recoveries) in the
+     diagnostic string.
+   - Self-test as a public feature: CMake option `USB2SPDIF_SELFTEST`
+     (default OFF) decodes the output on core 1 via a second PIO SM and
+     reports to the diagnostic string; host tool in `tools/` plays a test
+     pattern with a native WASAPI exclusive player (PortAudio is not
+     bit-exact) and checks it bit-exact.
+   - Soak: short soak (10 min each at 96/24 and 44.1/16, zero glitches)
+     before committing this phase; the long soak runs after step 7.
+     Stress: rapid format changes, open/close loops, replug, host
+     sleep/resume, host CPU load.
+   - Hosts: Android (functional: plays, lock, LED, 3-s stop; Eversolo T8
+     played 2 h clean on the phase-4 firmware). Linux and macOS later.
+7. UAC1 mode selected by a configuration pin at boot.
+   - Upgrade TinyUSB to 0.21 (UAC1 device support since 0.20; ISO
+     transfers handled in the ISR since 0.19, which removes the main-loop
+     re-arm latency risk). Pinned checkout via `PICO_TINYUSB_PATH`. Port
+     the UAC2 code to the 0.19+ API and re-verify every 0.18 workaround
+     below.
+   - UAC1 descriptors: AC header, Format Type I with the 5 discrete rates,
+     24-bit as 3-byte subslots, async ISO OUT with explicit feedback
+     (3-byte 10.14 on every host, so no Apple detection needed). Rate via
+     endpoint SET_CUR (`tud_audio_set_req_ep_cb()`).
+   - Pin: GPIO 27 (physical pin 32, next to GND on pin 33), internal
+     pull-up, read once before `tusb_init()`. Open = UAC2, jumper to GND =
+     UAC1. UAC1 needs its own USB PID (Windows caches the driver binding
+     per VID/PID).
+   - Then the long soak.
 
 ## Known TinyUSB issues (0.18, SDK 2.3.1)
 
@@ -142,6 +180,10 @@ generated analysis go in `scratch/` at the repository root. This folder and
   closed stream leaves its OUT endpoint armed and the next stream open
   panics ("ep 01 was already available"). `usb_audio.c` disarms the
   endpoints in `tud_audio_set_itf_close_EP_cb()`. Keep that workaround.
+- A zero-length ISO OUT packet makes the audio driver's rx path fail
+  (`TU_VERIFY(tu_fifo_write_n(..., 0))`) before the endpoint is re-armed,
+  so reception stops until the next SET_INTERFACE. Spec-compliant hosts do
+  not send them; `usb_audio.c` counts them as bad packets.
 - Feedback parameters are only read at SET_INTERFACE, not on a sample-rate
   change while streaming.
 - The feedback clamp is whole samples per ms: floor((fs-1)/1000) to

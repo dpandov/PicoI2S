@@ -10,18 +10,27 @@ picotool reset interface, which Windows binds to WinUSB automatically.
 
 Output fields:
     b<N>        boot count since power-up
-    prev=...    how the previous boot ended: none, panic, fault, hang, wdog
-    m<N>        last breadcrumb before that (see DIAG_MARK_* in src/diag/diag.h)
-    pc / lr     code address of the panic message, fault or hang
-    I<N> C<N>   SET_INTERFACE and clock requests seen this boot
+    none/...    how the previous boot ended: none, panic, fault, hang, wdog
+    m<N>        (after a crash) last breadcrumb, see DIAG_MARK_* in src/diag/diag.h
+    pc / lr     (after a crash) code address of the panic message, fault or hang
+    |           everything after the last "| " is the application status:
     D/I/S       link state: detached, idle, streaming
     a/o         host detected as Apple (3-byte 10.14 feedback) or other
     rate/bits   current stream format
-    ff<N>       receive FIFO level in bytes (depth 6208, held half full)
-    ur<N>       pipeline underruns (output ring ran dry while playing)
+    ff<N>       receive FIFO level in bytes (depth 9312, held half full)
+    ur<N>       underruns: output ring ran dry while playing
     run0/1      stream samples going out on S/PDIF
     led0/1      onboard LED state
     tx<Hz>      S/PDIF output sample rate, 0 when the output is stopped
+    ov<N>       overruns: USB packets that overwrote unread FIFO data
+    lt<N>       S/PDIF interrupts too late to refill a buffer in time
+    rmin<N>     lowest output ring level while playing, in frames (target 192)
+    fmax<N>     highest receive FIFO level in bytes
+    lp<us>      longest main-loop iteration in microseconds
+                (~1000 at 96 kHz loses a USB packet)
+    ur, ov, lt and rmin count from the start of the current or last stream
+    (open or format change); fmax and lp from when it began playing, so the
+    start-up (pre-roll, clock switch) is excluded. Counters stop at 999999.
 """
 import sys
 import time
@@ -35,12 +44,12 @@ STRID_DIAG = 0x20
 LANGID_EN_US = 0x0409
 
 
-def read_diag(backend):
+def read_diag(backend, index=STRID_DIAG):
     dev = usb.core.find(idVendor=VID, idProduct=PID, backend=backend)
     if dev is None:
         return "<device not found>"
     try:
-        return usb.util.get_string(dev, STRID_DIAG, LANGID_EN_US)
+        return usb.util.get_string(dev, index, LANGID_EN_US)
     except usb.core.USBError as e:
         return f"<error: {e}>"
     finally:

@@ -51,9 +51,10 @@ extern "C" {
 #define CFG_TUD_AUDIO_ENABLE_EP_OUT         1
 #define CFG_TUD_AUDIO_FUNC_1_EP_OUT_SZ_MAX  TUD_AUDIO_EP_SIZE(AUDIO_MAX_SAMPLE_RATE, AUDIO_24BIT_SUBSLOT, AUDIO_N_CHANNELS)
 
-// 8 max-size packets. Feedback holds it half full: 4 ms at 96 kHz / 24-bit,
-// 16 ms at 48 kHz / 16-bit. Must be a multiple of both frame sizes (4, 8).
-#define CFG_TUD_AUDIO_FUNC_1_EP_OUT_SW_BUF_SZ (8 * CFG_TUD_AUDIO_FUNC_1_EP_OUT_SZ_MAX)
+// 12 max-size packets. Feedback holds it half full (6 ms at 96 kHz / 24-bit,
+// 24 ms at 48 kHz / 16-bit); the upper half takes the pre-roll (see
+// audio_pipeline.c). Must be a multiple of both frame sizes (4, 8).
+#define CFG_TUD_AUDIO_FUNC_1_EP_OUT_SW_BUF_SZ (12 * CFG_TUD_AUDIO_FUNC_1_EP_OUT_SZ_MAX)
 
 #define CFG_TUD_AUDIO_ENABLE_FEEDBACK_EP    1
 // Overridden per host by tud_audio_feedback_format_correction_cb().

@@ -16,3 +16,7 @@ audio_family_t audio_clock_family(uint32_t sample_rate);
 void audio_clock_set_family(audio_family_t family);
 
 audio_family_t audio_clock_current_family(void);
+
+// Incremented before and after every switch: odd while clk_sys is changing.
+// For observers on the other core.
+uint32_t audio_clock_generation(void);

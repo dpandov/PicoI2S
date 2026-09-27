@@ -3,39 +3,42 @@
 #include <stdio.h>
 #include "pico/stdlib.h"
 #include "hardware/clocks.h"
-#include "board_config.h"
 #include "app/audio_pipeline.h"
+#include "app/log.h"
 #include "app/status_led.h"
 #include "diag/diag.h"
 #include "spdif/spdif_tx.h"
 #include "usb/usb_audio.h"
 #include "usb/usb_descriptors.h"
 
-// stdio blocks while the UART FIFO is full: keep lines short and rare.
-
 void monitor_init(void) {
-    stdio_uart_init_full(CONSOLE_UART, CONSOLE_BAUD, CONSOLE_UART_TX, CONSOLE_UART_RX);
-    printf("\nusb2spdif\n");
-    printf("clk_sys %lu, clk_peri %lu, clk_usb %lu\n",
-           (unsigned long)clock_get_hz(clk_sys),
-           (unsigned long)clock_get_hz(clk_peri),
-           (unsigned long)clock_get_hz(clk_usb));
+    log_init();
+    log_printf("\nusb2spdif\n");
+    log_printf("clk_sys %lu, clk_peri %lu, clk_usb %lu\n",
+               (unsigned long)clock_get_hz(clk_sys),
+               (unsigned long)clock_get_hz(clk_peri),
+               (unsigned long)clock_get_hz(clk_usb));
 }
 
 static void log_format(const char *what) {
     usb_audio_format_t f = usb_audio_format();
-    printf("%s %lu Hz %u-bit\n", what, (unsigned long)f.sample_rate, f.resolution);
+    log_printf("%s %lu Hz %u-bit\n", what, (unsigned long)f.sample_rate, f.resolution);
 }
 
 static void log_events(uint32_t ev) {
-    if (ev & USB_AUDIO_EVT_MOUNTED)      printf("usb: mounted\n");
-    if (ev & USB_AUDIO_EVT_UNMOUNTED)    printf("usb: unmounted\n");
+    if (ev & USB_AUDIO_EVT_MOUNTED)      log_printf("usb: mounted\n");
+    if (ev & USB_AUDIO_EVT_UNMOUNTED)    log_printf("usb: unmounted\n");
     if (ev & USB_AUDIO_EVT_RATE_CHANGED) log_format("usb: rate");
     if (ev & USB_AUDIO_EVT_STREAM_START) log_format("usb: stream start");
-    if (ev & USB_AUDIO_EVT_STREAM_STOP)  printf("usb: stream stop\n");
+    if (ev & USB_AUDIO_EVT_STREAM_STOP)  log_printf("usb: stream stop\n");
 }
 
-// Format documented in tools/diag.py.
+// Keeps the status line within its 95 characters.
+static unsigned long clamp6(uint32_t v) {
+    return v > 999999u ? 999999ul : (unsigned long)v;
+}
+
+// Format documented in tools/diag.py. At most 91 characters.
 static void update_diag_status(void) {
     static uint64_t last_us;
     uint64_t now = time_us_64();
@@ -47,13 +50,19 @@ static void update_diag_status(void) {
     usb_audio_format_t f = usb_audio_format();
     usb_audio_stats_t s;
     usb_audio_get_stats(&s);
+    audio_pipeline_stats_t ps;
+    audio_pipeline_get_stats(&ps);
     static const char link_chr[] = {'D', 'I', 'S'};
-    char buf[49];
-    snprintf(buf, sizeof(buf), "%c%c %lu/%u ff%u ur%lu run%d led%d tx%lu",
+    char buf[96];
+    snprintf(buf, sizeof(buf),
+             "%c%c %lu/%u ff%u ur%lu run%d led%d tx%lu ov%lu lt%lu rmin%lu fmax%lu lp%lu",
              link_chr[usb_audio_link_state()], usb_host_is_apple() ? 'a' : 'o',
              (unsigned long)f.sample_rate, f.resolution, s.fifo_level,
-             (unsigned long)audio_pipeline_underruns(), audio_pipeline_playing() ? 1 : 0,
-             status_led_is_on() ? 1 : 0, (unsigned long)spdif_tx_sample_rate());
+             clamp6(ps.underruns), audio_pipeline_playing() ? 1 : 0,
+             status_led_is_on() ? 1 : 0, (unsigned long)spdif_tx_sample_rate(),
+             clamp6(ps.overruns), clamp6(ps.late_irqs), clamp6(ps.ring_min),
+             clamp6(ps.fifo_max),
+             clamp6(ps.loop_max_us));
     diag_set_app_status(buf);
 }
 
@@ -68,8 +77,17 @@ static void log_stats(void) {
     usb_audio_get_stats(&st);
     if (usb_audio_link_state() == USB_AUDIO_STREAMING && last_us != 0) {
         uint32_t bps = (uint32_t)(((uint64_t)(st.rx_bytes - last_rx) * 1000000u) / (now - last_us));
-        printf("stat: %lu B/s fifo %u/%u ur %lu\n", (unsigned long)bps,
-               st.fifo_level, st.fifo_depth, (unsigned long)audio_pipeline_underruns());
+        audio_pipeline_stats_t ps;
+        audio_pipeline_get_stats(&ps);
+        log_printf("stat: %lu B/s fifo %u/%u max %lu ur %lu/%lu ov %lu/%lu bad %lu "
+                   "lt %lu rmin %lu lp %lu drop %lu\n",
+                   (unsigned long)bps, st.fifo_level, st.fifo_depth,
+                   (unsigned long)ps.fifo_max, (unsigned long)ps.underruns,
+                   (unsigned long)ps.underruns_total, (unsigned long)ps.overruns,
+                   (unsigned long)ps.overruns_total, (unsigned long)st.bad_packets,
+                   (unsigned long)ps.late_irqs,
+                   (unsigned long)ps.ring_min, (unsigned long)ps.loop_max_us,
+                   (unsigned long)log_dropped());
     }
     last_us = now;
     last_rx = st.rx_bytes;

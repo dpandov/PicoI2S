@@ -44,12 +44,19 @@ void diag_clock_changed(void);
 // Call once per main-loop iteration: feeds the watchdog and the heartbeat.
 void diag_loop(void);
 
+// Longest main-loop iteration (time between diag_loop() calls) since the
+// last reset, in microseconds.
+uint32_t diag_loop_max_us(void);
+void diag_loop_max_reset(void);
+
 // Record a breadcrumb (a single register write, safe anywhere).
 void diag_mark(uint32_t mark);
 
-// Application status appended to the report (copied, truncated to 48 chars).
+// Application status appended to the report (copied, truncated to 95 chars).
 // Call from the main loop only.
 void diag_set_app_status(const char *status);
 
-// Report text, at most 126 characters (USB string limit).
+// Report text, at most 126 characters (USB string limit):
+// "b<boots> <prev kind>[ m<mark> pc<addr> lr<addr>] | <app status>".
+// The crash location is only shown when the previous boot crashed.
 const char *diag_string(void);

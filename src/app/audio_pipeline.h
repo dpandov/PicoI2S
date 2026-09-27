@@ -12,6 +12,20 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+typedef struct {
+    // Since the current or last stream started (opened or changed format).
+    uint32_t underruns;       // ring ran dry while playing
+    uint32_t overruns;        // USB packets that overwrote unread FIFO data
+    uint32_t late_irqs;       // S/PDIF interrupts too late to refill in time
+    uint32_t ring_min;        // lowest ring level while playing, in frames
+    // Since the stream first started playing (excludes the start-up).
+    uint32_t fifo_max;        // highest receive FIFO level, in bytes
+    uint32_t loop_max_us;     // longest main-loop iteration
+    // Since boot.
+    uint32_t underruns_total;
+    uint32_t overruns_total;
+} audio_pipeline_stats_t;
+
 // Call after spdif_tx_init().
 void audio_pipeline_init(void);
 
@@ -21,5 +35,4 @@ void audio_pipeline_task(void);
 // Stream samples are going out (pre-roll done, no underrun since).
 bool audio_pipeline_playing(void);
 
-// Times the ring ran dry while playing.
-uint32_t audio_pipeline_underruns(void);
+void audio_pipeline_get_stats(audio_pipeline_stats_t *stats);

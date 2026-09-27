@@ -103,6 +103,7 @@ src/
   spdif/            S/PDIF encoder, PIO program, DMA driver
   clock/            system PLL per sample-rate family
   diag/             crash and hang diagnostics
+  selftest/         optional S/PDIF output self-test (decoder on core 1)
 tools/              host-side test and diagnostic scripts
 ```
 
@@ -156,6 +157,43 @@ Host tools in `tools/` (`pip install -r tools/requirements.txt`):
   (panic, fault or hang location) and live stream status. This works without
   a debug probe or UART.
 
+## Self-test
+
+A self-test build checks the S/PDIF output bit-exactly without a receiver
+or any extra hardware. Core 1 samples the S/PDIF pin with a spare PIO state
+machine, decodes the biphase-mark stream and compares it with what the
+transmitter should send: framing, parity, channel status, the measured
+sample rate and, while the PC plays a test pattern, every sample. The result
+is served as a hidden USB string next to the diagnostic string.
+
+```
+cmake -S . -B build-selftest -G Ninja -DPICO_BOARD=pico2 -DUSB2SPDIF_SELFTEST=ON
+cmake --build build-selftest
+picotool load -x build-selftest/usb2spdif.uf2 -f --vid 0x1209 --pid 0x0001
+python tools/selftest.py
+```
+
+`tools/selftest.py` builds a small native WASAPI player on first use (with
+the `ziglang` package from `tools/requirements.txt`; PortAudio's exclusive
+mode is not bit-exact) and plays the pattern at all 5 rates x 2 bit depths,
+in an order that switches clock families both ways and changes bit depth at
+the same rate, then checks the 3-second stop. PASS means that during
+playback every decoded window was clean and carried only pattern frames,
+the channel status had the right rate and word length, the measured rate was
+within 2000 ppm, no window failed in between reads, the device reported no
+underruns, overruns or late interrupts, and it did not reboot.
+
+For a long run on one format, `python tools/selftest.py --soak 60 --rate
+96000 --bits 24` plays for 60 minutes and logs every glitch with a time
+stamp; it passes only with none. `--only 44100/16` runs one sweep item,
+`--status` prints the current reports.
+
+Combined with `-DUSB2SPDIF_TEST_TONE=ON`, the self-test checks the tone's
+framing, channel status and rate (no pattern). To test the optics and a real
+receiver, use the test tone build and watch the receiver's lock indicator.
+The self-test does not change the audio path; the normal build contains none
+of it.
+
 ## Status
 
 - Step 1, bring-up: done.
@@ -166,7 +204,12 @@ Host tools in `tools/` (`pip install -r tools/requirements.txt`):
   bit-exact on the S/PDIF line (checked by a test build that decodes its own
   output), including clock family switches and the 3-second stop. A
   receiver locks to the output through the FCR684205T; playback verified
-  from Windows and iPad.
+  from Windows, iPad and an Android streamer (Eversolo T8).
+- Robustness: a late S/PDIF interrupt (tested with interrupts masked up to
+  10 ms) repeats the last block with valid framing and resyncs by itself;
+  USB overruns and underruns are detected and counted; logging never
+  blocks. Short soak (10 min each at 96/24 and 44.1/16) bit-exact with
+  zero glitches. Long soak pending.
 
 Known limitations:
 

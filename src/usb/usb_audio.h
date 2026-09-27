@@ -17,12 +17,17 @@ typedef struct {
     uint8_t  subslot_bytes;   // bytes per sample in the stream: 2 or 4
 } usb_audio_format_t;
 
+// Counters are cumulative since boot.
 typedef struct {
     uint32_t rx_bytes;        // total payload bytes read via usb_audio_read()
     uint32_t rate_changes;    // accepted SET_CUR requests that changed the rate
     uint32_t rate_rejects;    // SET_CUR requests with an unsupported rate
+    uint32_t overruns;        // packets that overwrote unread FIFO data
+    uint32_t bad_packets;     // zero-length packets, or not whole stereo frames
     uint16_t fifo_level;      // bytes currently in the receive FIFO
     uint16_t fifo_depth;      // receive FIFO capacity in bytes
+    uint16_t fifo_max;        // highest level after a packet since the last
+                              // usb_audio_fifo_max_reset()
 } usb_audio_stats_t;
 
 // Event bits returned by usb_audio_take_events().
@@ -50,6 +55,7 @@ usb_audio_format_t usb_audio_format(void);
 uint32_t usb_audio_take_events(void);
 
 void usb_audio_get_stats(usb_audio_stats_t *stats);
+void usb_audio_fifo_max_reset(void);
 
 // Reads up to max_bytes of interleaved little-endian PCM, whole stereo
 // frames only. Returns the number of bytes read.
