@@ -51,8 +51,8 @@ int32_t spdif_tx_trim_ppb(void);
 void spdif_tx_trim_task(void);
 
 // Rate error of the running output at zero trim against its nominal sample
-// rate, in ppb, from the configured clk_sys (e.g. -186015 at 48 kHz). 0 when
-// stopped.
+// rate, in ppb, from the configured clk_sys (see clock/audio_clock.c). 0
+// when stopped.
 int32_t spdif_tx_rate_error_ppb(void);
 
 // Incremented before and after every start, stop and word-length change:

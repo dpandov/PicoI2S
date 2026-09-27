@@ -29,7 +29,9 @@ static usb_audio_mode_t read_mode_pin(void) {
 }
 
 int main(void) {
+    usb_audio_mode_t mode = read_mode_pin();
     // First: diag_init() derives its SysTick period from clk_sys.
+    audio_clock_init(mode == USB_AUDIO_MODE_UAC1 ? AUDIO_CLOCK_FAST : AUDIO_CLOCK_ACCURATE);
     audio_clock_set_family(AUDIO_FAMILY_48K);
     diag_init();
     monitor_init();
@@ -45,7 +47,7 @@ int main(void) {
     audio_pipeline_init();
 #endif
 
-    usb_audio_init(read_mode_pin());
+    usb_audio_init(mode);
     const tusb_rhport_init_t dev_init = {
         .role  = TUSB_ROLE_DEVICE,
         .speed = TUSB_SPEED_FULL,

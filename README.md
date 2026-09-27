@@ -87,13 +87,21 @@ USB host --iso OUT--> TinyUSB FIFO --main loop--> PCM ring --DMA IRQ: BMC encode
   rate selected through the clock source entity. Asynchronous mode with an
   explicit feedback endpoint; the Pico is the audio clock master.
 - **Clocking**: the system PLL is switched between two settings so the PIO
-  divider is an integer for each sample-rate family. Residual error is
-  absorbed by the feedback endpoint.
+  divider is an integer for each sample-rate family; the fractional divider
+  is never used in UAC2 mode, because it stretches single cells by one
+  system-clock cycle. The settings are the best an integer PLL can do from
+  the 12 MHz crystal (exhaustive search): the 48k family is exact, the
+  44.1k family cannot be within the VCO limits. What remains is the crystal
+  tolerance and, for 44.1k, -63 ppm, both absorbed by the feedback endpoint.
 
-  | Family | sys_clk | PLL fbdiv / postdiv | Error |
-  |---|---|---|---|
-  | 48k (32, 48, 96) | 147.4286 MHz | 86 / 7x1 | -186 ppm |
-  | 44.1k (44.1, 88.2) | 135.4286 MHz | 79 / 7x1 | -344 ppm |
+  | Family | sys_clk | PLL fbdiv / postdiv | PIO divider | Error |
+  |---|---|---|---|---|
+  | 48k (32, 48, 96) | 61.44 MHz | 128 / 5x5 | 15 / 10 / 5 | 0 ppm |
+  | 44.1k (44.1, 88.2) | 101.6 MHz | 127 / 5x3 | 18 / 9 | -63 ppm |
+
+  UAC1 mode runs the faster settings 147.43 / 135.43 MHz instead (-186 /
+  -344 ppm): its clock servo cancels the error anyway, and the higher clock
+  gives the trim a finer step.
 
 - **S/PDIF**: the CPU biphase-mark encodes each frame (preamble, 24-bit
   sample, V/U/C/P bits) into 128 line cells with a table lookup; a PIO state
@@ -262,6 +270,10 @@ of it.
   output), including clock family switches and the 3-second stop. A
   receiver locks to the output through the FCR684205T; playback verified
   from Windows, iPad and an Android streamer (Eversolo T8).
+- Clock accuracy: with the accurate PLL settings the output measures
+  exactly 32 000 / 48 000 / 96 000 Hz and -63 ppm at 44.1 / 88.2 kHz
+  (self-test decoder against the crystal), verified bit-exact with the
+  CPU at 61.44 MHz (worst main-loop iteration about 0.6 ms).
 - Robustness: a late S/PDIF interrupt (tested with interrupts masked up to
   10 ms) repeats the last block with valid framing and resyncs by itself;
   USB overruns and underruns are detected and counted; logging never

@@ -41,7 +41,7 @@ _Static_assert(2 * SPDIF_TX_BUFFER_FRAMES == SPDIF_BLOCK_FRAMES,
 // Frames encoded between two checks of the DMA position.
 #define CHUNK_FRAMES 16u
 // Minimum distance from the DMA read pointer to a chunk about to be written:
-// 16 frames (167 us at 96 kHz) against about 10 us to encode a chunk.
+// 16 frames (167 us at 96 kHz) against under 30 us to encode a chunk.
 #define GUARD_WORDS  (16u * SPDIF_WORDS_PER_FRAME)
 
 _Static_assert(SPDIF_TX_BUFFER_FRAMES % CHUNK_FRAMES == 0, "whole chunks per buffer");

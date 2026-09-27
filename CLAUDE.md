@@ -108,9 +108,12 @@ generated analysis go in `scratch/` at the repository root. This folder and
    - BMC encoding on the CPU (table lookup, line-level tracking; preambles
      are constants thanks to even parity). PIO program is `out pins, 1` at
      the cell rate (128 x Fs).
-   - clk_sys 147.43 MHz (PLL 12 MHz x 86 / 7 / 1) for the 48 kHz family,
-     so the PIO divider is an integer (36 / 24 / 12). 44.1 kHz family comes
-     in phase B.
+   - clk_sys per family so the PIO divider is an integer (integer only:
+     the fractional divider stretches cells). UAC2 uses the most accurate
+     in-spec PLL settings (61.44 MHz: 0 ppm for 32/48/96; 101.6 MHz:
+     -63 ppm for 44.1/88.2, the best possible below a 1600 MHz VCO); UAC1
+     the fastest (147.43 / 135.43 MHz) since its servo cancels the error.
+     Tables and reasoning in `src/clock/audio_clock.c`.
    - Two chained DMA channels over two 96-frame buffers; the completion IRQ
      re-encodes the finished buffer. Frame counter mod 192 drives the block
      preamble and channel status.
@@ -241,7 +244,7 @@ generated analysis go in `scratch/` at the repository root. This folder and
 - The feedback clamp is whole samples per ms: floor((fs-1)/1000) to
   fs/1000+1. For the 44.1 kHz family that allows only -0.23 % below nominal
   (44.0 of 44.1), so the S/PDIF clock may run slow by at most ~2000 ppm.
-  The planned PLL error (-344 ppm) is inside that.
+  The PLL error (-63 ppm in UAC2) is inside that.
 - `tud_umount_cb()` is called on unplug but not on a bus reset;
   `usb_audio.c` polls `tud_mounted()`.
 - Fixed since 0.18 (workaround removed, to be confirmed on hardware with

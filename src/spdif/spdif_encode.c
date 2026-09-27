@@ -136,7 +136,7 @@ int spdif_channel_status_build(uint8_t cs[SPDIF_CS_BYTES], uint32_t sample_rate,
     // Byte 1 = 0: category general.
     // Byte 2 = 0: source and channel number unspecified.
     // Byte 3 bits 4-5 = 0: clock accuracy level II (+-1000 ppm), which covers
-    // the -344 ppm PLL error of the 44.1 kHz family.
+    // the PLL error of every clock setting (see clock/audio_clock.c).
     cs[3] = rate_code;
     cs[4] = len_code;
     return 0;

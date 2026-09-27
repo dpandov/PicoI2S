@@ -31,7 +31,7 @@ _Static_assert(SPDIF_CS_BYTES == SELFTEST_CS_BYTES, "channel status size");
 #endif
 
 // Capture divider: the smallest integer that keeps the oversampling at or
-// below MAX_OVS samples per cell (tx divider 36 / 24 / 12 -> 9 / 8 / 6).
+// below MAX_OVS samples per cell (tx divider 5..36 -> 5..9).
 #define MAX_OVS         9u
 // Three blocks plus two frames: at least two complete blocks at any phase.
 #define WINDOW_CELLS    (3u * 192u * 128u + 256u)

@@ -9,6 +9,14 @@ typedef enum {
     AUDIO_FAMILY_44K1,    // 44.1, 88.2 kHz
 } audio_family_t;
 
+typedef enum {
+    AUDIO_CLOCK_ACCURATE,   // lowest PLL error: the Pico is the clock master (UAC2)
+    AUDIO_CLOCK_FAST,       // highest clk_sys: the clock servo cancels the error (UAC1)
+} audio_clock_profile_t;
+
+// Selects the PLL table. Call once, before the first audio_clock_set_family().
+void audio_clock_init(audio_clock_profile_t profile);
+
 audio_family_t audio_clock_family(uint32_t sample_rate);
 
 // Switches clk_sys; clk_peri stays on the 48 MHz USB PLL. Stop the S/PDIF
