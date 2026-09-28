@@ -3,9 +3,11 @@
 // Interfaces: 0 Audio Control and 1 Audio Streaming, 2 picotool reset
 // (vendor). The audio function is chosen at boot (usb_audio_mode()):
 // - UAC2, one IAD. Topology: Clock -> USB streaming Input Terminal ->
-//   S/PDIF Output Terminal.
+//   Feature Unit -> S/PDIF Output Terminal.
 // - UAC1, no IAD (the AC header lists the streaming interface), own PID.
-//   Topology: USB streaming Input Terminal -> S/PDIF Output Terminal.
+//   Topology: USB streaming Input Terminal -> Feature Unit -> S/PDIF
+//   Output Terminal.
+// The Feature Unit has master mute and volume only (usb_audio.c).
 // The BOS / MS OS 2.0 descriptors come from the SDK's pico_usb_reset.
 
 #include <stddef.h>
@@ -132,8 +134,10 @@ TU_VERIFY_STATIC(AUDIO_EP_SIZE(AUDIO_24BIT_SUBSLOT) == CFG_TUD_AUDIO_FUNC_1_EP_O
                  "largest alt setting must match CFG_TUD_AUDIO_FUNC_1_EP_OUT_SZ_MAX");
 TU_VERIFY_STATIC(AUDIO_EP_SIZE(AUDIO_24BIT_SUBSLOT) <= 1023, "FS iso packet limit exceeded");
 
-// No Feature Unit on purpose: without device volume, the host applies
-// volume in software and exclusive-mode playback stays bit-perfect.
+#define AUDIO_FU_MASTER_CONTROLS \
+    ((AUDIO20_CTRL_RW << AUDIO20_FEATURE_UNIT_CTRL_MUTE_POS) | \
+     (AUDIO20_CTRL_RW << AUDIO20_FEATURE_UNIT_CTRL_VOLUME_POS))
+
 #define AUDIO_AC_ENTITIES                                                     \
     TUD_AUDIO20_DESC_CLK_SRC(                                                 \
         /*_clkid*/     UAC2_ENTITY_CLOCK,                                     \
@@ -151,11 +155,18 @@ TU_VERIFY_STATIC(AUDIO_EP_SIZE(AUDIO_24BIT_SUBSLOT) <= 1023, "FS iso packet limi
         /*_idxchannelnames*/  0x00,                                           \
         /*_ctrl*/             AUDIO20_CTRL_NONE,                              \
         /*_stridx*/           0x00),                                          \
+    TUD_AUDIO20_DESC_FEATURE_UNIT(                                            \
+        /*_unitid*/ UAC2_ENTITY_FEATURE_UNIT,                                 \
+        /*_srcid*/  UAC2_ENTITY_INPUT_TERMINAL,                               \
+        /*_stridx*/ 0x00,                                                     \
+        /*_ctrlch0master*/ AUDIO_FU_MASTER_CONTROLS,                          \
+        /*_ctrlch1*/       AUDIO20_CTRL_NONE,                                 \
+        /*_ctrlch2*/       AUDIO20_CTRL_NONE),                                \
     TUD_AUDIO20_DESC_OUTPUT_TERM(                                             \
         /*_termid*/    UAC2_ENTITY_OUTPUT_TERMINAL,                           \
         /*_termtype*/  TERM_TYPE_EXT_SPDIF,                                   \
         /*_assocTerm*/ AUDIO_NO_ASSOC_TERMINAL,                               \
-        /*_srcid*/     UAC2_ENTITY_INPUT_TERMINAL,                            \
+        /*_srcid*/     UAC2_ENTITY_FEATURE_UNIT,                              \
         /*_clkid*/     UAC2_ENTITY_CLOCK,                                     \
         /*_ctrl*/      AUDIO20_CTRL_NONE,                                     \
         /*_stridx*/    0x00)
@@ -225,7 +236,7 @@ TU_VERIFY_STATIC(sizeof((uint8_t const[]){ AUDIO_AS_STREAM_ALT(AS_ALT_24BIT, AUD
 TU_VERIFY_STATIC(sizeof((uint8_t const[]){ USB2SPDIF_AUDIO_FUNCTION_DESCRIPTOR(AUDIO_FB_EP_SIZE) })
                      == USB2SPDIF_AUDIO_DESC_LEN,
                  "USB2SPDIF_AUDIO_DESC_LEN does not match the audio descriptor block");
-TU_VERIFY_STATIC(USB2SPDIF_AUDIO_DESC_LEN == 178, "unexpected audio block length");
+TU_VERIFY_STATIC(USB2SPDIF_AUDIO_DESC_LEN == 196, "unexpected audio block length");
 
 //--------------------------------------------------------------------+
 // UAC1 function
@@ -248,6 +259,13 @@ TU_VERIFY_STATIC(UAC1_EP_SIZE == 196, "unexpected UAC1 EP size");
 TU_VERIFY_STATIC(UAC1_EP_SIZE <= CFG_TUD_AUDIO_FUNC_1_EP_OUT_SZ_MAX,
                  "UAC1 EP exceeds CFG_TUD_AUDIO_FUNC_1_EP_OUT_SZ_MAX");
 
+// Feature Unit with 1-byte bmaControls like the PCM2704 (TinyUSB's macro
+// uses 2 bytes): master, channel 1, channel 2, then iFeature.
+#define UAC1_DESC_FEATURE_UNIT_STEREO(_unitid, _srcid, _ctrlmaster, _ctrlch1, _ctrlch2) \
+    USB2SPDIF_UAC1_FEATURE_UNIT_LEN, TUSB_DESC_CS_INTERFACE,                  \
+    AUDIO10_CS_AC_INTERFACE_FEATURE_UNIT, _unitid, _srcid,                    \
+    /*bControlSize*/ 1, _ctrlmaster, _ctrlch1, _ctrlch2, /*iFeature*/ 0x00
+
 #define UAC1_AC_ENTITIES                                                      \
     TUD_AUDIO10_DESC_INPUT_TERM(                                              \
         /*_termid*/          UAC1_ENTITY_INPUT_TERMINAL,                      \
@@ -257,15 +275,21 @@ TU_VERIFY_STATIC(UAC1_EP_SIZE <= CFG_TUD_AUDIO_FUNC_1_EP_OUT_SZ_MAX,
         /*_channelcfg*/      UAC1_STEREO_CHANNEL_CONFIG,                      \
         /*_idxchannelnames*/ 0x00,                                            \
         /*_stridx*/          0x00),                                           \
+    UAC1_DESC_FEATURE_UNIT_STEREO(                                            \
+        /*_unitid*/     UAC1_ENTITY_FEATURE_UNIT,                             \
+        /*_srcid*/      UAC1_ENTITY_INPUT_TERMINAL,                           \
+        /*_ctrlmaster*/ (AUDIO10_FU_CONTROL_BM_MUTE | AUDIO10_FU_CONTROL_BM_VOLUME), \
+        /*_ctrlch1*/    0x00,                                                 \
+        /*_ctrlch2*/    0x00),                                                \
     TUD_AUDIO10_DESC_OUTPUT_TERM(                                             \
         /*_termid*/    UAC1_ENTITY_OUTPUT_TERMINAL,                           \
         /*_termtype*/  TERM_TYPE_EXT_SPDIF,                                   \
         /*_assocTerm*/ AUDIO_NO_ASSOC_TERMINAL,                               \
-        /*_srcid*/     UAC1_ENTITY_INPUT_TERMINAL,                            \
+        /*_srcid*/     UAC1_ENTITY_FEATURE_UNIT,                              \
         /*_stridx*/    0x00)
 
-// No Feature Unit, as in UAC2. The rate is set with the endpoint's
-// sampling frequency control (usb_audio.c).
+// The rate is set with the endpoint's sampling frequency control
+// (usb_audio.c).
 #define USB2SPDIF_UAC1_AUDIO_FUNCTION_DESCRIPTOR                              \
     TUD_AUDIO10_DESC_STD_AC(                                                  \
         /*_itfnum*/ ITF_NUM_AUDIO_CONTROL,                                    \
@@ -311,7 +335,10 @@ TU_VERIFY_STATIC(sizeof((uint8_t const[]){ UAC1_AC_ENTITIES }) == USB2SPDIF_UAC1
 TU_VERIFY_STATIC(sizeof((uint8_t const[]){ USB2SPDIF_UAC1_AUDIO_FUNCTION_DESCRIPTOR })
                      == USB2SPDIF_UAC1_AUDIO_DESC_LEN,
                  "USB2SPDIF_UAC1_AUDIO_DESC_LEN does not match the audio descriptor block");
-TU_VERIFY_STATIC(USB2SPDIF_UAC1_AUDIO_DESC_LEN == 97, "unexpected UAC1 audio block length");
+TU_VERIFY_STATIC(sizeof((uint8_t const[]){ UAC1_DESC_FEATURE_UNIT_STEREO(0, 0, 0, 0, 0) })
+                     == USB2SPDIF_UAC1_FEATURE_UNIT_LEN,
+                 "UAC1 Feature Unit length mismatch");
+TU_VERIFY_STATIC(USB2SPDIF_UAC1_AUDIO_DESC_LEN == 107, "unexpected UAC1 audio block length");
 
 //--------------------------------------------------------------------+
 // Configuration descriptor
@@ -346,7 +373,7 @@ TU_VERIFY_STATIC(sizeof(desc_configuration) == CONFIG_TOTAL_LEN,
                  "configuration descriptor length mismatch");
 TU_VERIFY_STATIC(sizeof(desc_configuration_apple) == CONFIG_TOTAL_LEN,
                  "Apple configuration descriptor length mismatch");
-TU_VERIFY_STATIC(CONFIG_TOTAL_LEN == 196, "unexpected configuration length");
+TU_VERIFY_STATIC(CONFIG_TOTAL_LEN == 214, "unexpected configuration length");
 
 #define CONFIG_TOTAL_LEN_UAC1 \
     (TUD_CONFIG_DESC_LEN + USB2SPDIF_UAC1_AUDIO_DESC_LEN + TUD_RPI_RESET_DESC_LEN)
@@ -365,7 +392,7 @@ static uint8_t const desc_configuration_uac1[] = {
 
 TU_VERIFY_STATIC(sizeof(desc_configuration_uac1) == CONFIG_TOTAL_LEN_UAC1,
                  "UAC1 configuration descriptor length mismatch");
-TU_VERIFY_STATIC(CONFIG_TOTAL_LEN_UAC1 == 115, "unexpected UAC1 configuration length");
+TU_VERIFY_STATIC(CONFIG_TOTAL_LEN_UAC1 == 125, "unexpected UAC1 configuration length");
 
 //--------------------------------------------------------------------+
 // Host detection
@@ -426,7 +453,7 @@ static char const *const string_table[STRID_COUNT] = {
     [STRID_MANUFACTURER]   = USB_MANUFACTURER_STR,
     [STRID_PRODUCT]        = USB_PRODUCT_STR,
     [STRID_SERIAL]         = serial_str,        // filled on first request
-    [STRID_AUDIO_FUNCTION] = "USB to S/PDIF",
+    [STRID_AUDIO_FUNCTION] = USB_PRODUCT_STR,
     [STRID_RESET]          = "Reset",
 };
 
@@ -486,7 +513,8 @@ uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid)
         }
 
         char const *str = string_table[index];
-        if (index == STRID_PRODUCT && usb_audio_mode() == USB_AUDIO_MODE_UAC1) {
+        if ((index == STRID_PRODUCT || index == STRID_AUDIO_FUNCTION) &&
+            usb_audio_mode() == USB_AUDIO_MODE_UAC1) {
             str = USB_PRODUCT_STR_UAC1;
         }
         chr_count = 0;

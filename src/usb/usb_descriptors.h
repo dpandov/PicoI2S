@@ -17,12 +17,13 @@
 
 // Bump on every descriptor change: Windows caches descriptors per
 // VID/PID/bcdDevice.
-#define USB_BCD_DEVICE          0x0102
+#define USB_BCD_DEVICE          0x0103
 
 #define USB_MANUFACTURER_STR    "usb2spdif"
 #define USB_PRODUCT_STR         "USB to S/PDIF"
-// Host tools find the device by the "USB to S/PDIF" part.
-#define USB_PRODUCT_STR_UAC1    "USB to S/PDIF (UAC1)"
+// UAC1 mode: replaces the product and the audio function string (hosts
+// name the device after either). The host tools match both names.
+#define USB_PRODUCT_STR_UAC1    "USB to SPDIF"
 
 //--------------------------------------------------------------------+
 // Interfaces
@@ -50,10 +51,11 @@ enum {
 #define UAC1_MAX_SAMPLE_RATE    48000
 
 //--------------------------------------------------------------------+
-// UAC2 entities: Clock -> Input Terminal -> Output Terminal
+// UAC2 entities: Clock -> Input Terminal -> Feature Unit -> Output Terminal
 //--------------------------------------------------------------------+
 
 #define UAC2_ENTITY_INPUT_TERMINAL   0x01   // USB streaming
+#define UAC2_ENTITY_FEATURE_UNIT     0x02   // master mute and volume
 #define UAC2_ENTITY_OUTPUT_TERMINAL  0x03   // S/PDIF interface
 #define UAC2_ENTITY_CLOCK            0x04   // internal programmable clock
 
@@ -62,10 +64,11 @@ enum {
 #define TERM_TYPE_EXT_SPDIF          0x0605
 
 //--------------------------------------------------------------------+
-// UAC1 entities: Input Terminal -> Output Terminal
+// UAC1 entities: Input Terminal -> Feature Unit -> Output Terminal
 //--------------------------------------------------------------------+
 
 #define UAC1_ENTITY_INPUT_TERMINAL   0x01   // USB streaming
+#define UAC1_ENTITY_FEATURE_UNIT     0x02   // master mute and volume
 #define UAC1_ENTITY_OUTPUT_TERMINAL  0x03   // S/PDIF interface (0x0605)
 
 //--------------------------------------------------------------------+
@@ -106,9 +109,11 @@ enum {
 
 // Expanded only where tusb.h is already included.
 
-// CS AC entities after the header: clock source, input and output terminal.
+// CS AC entities after the header: clock source, input terminal, feature
+// unit (master and two channels), output terminal.
 #define USB2SPDIF_AC_ENTITIES_LEN (TUD_AUDIO20_DESC_CLK_SRC_LEN \
     + TUD_AUDIO20_DESC_INPUT_TERM_LEN                            \
+    + TUD_AUDIO20_DESC_FEATURE_UNIT_LEN(AUDIO_N_CHANNELS)        \
     + TUD_AUDIO20_DESC_OUTPUT_TERM_LEN)
 
 // One streaming alt setting (alt 1 or 2).
@@ -127,8 +132,13 @@ enum {
     + TUD_AUDIO20_DESC_STD_AS_LEN                          \
     + 2 * USB2SPDIF_AS_ALT_STREAM_DESC_LEN)
 
-// UAC1 CS AC entities after the header: input and output terminal.
+// UAC1 Feature Unit with 1-byte controls: master and two channels.
+#define USB2SPDIF_UAC1_FEATURE_UNIT_LEN (7 + (AUDIO_N_CHANNELS + 1))
+
+// UAC1 CS AC entities after the header: input terminal, feature unit,
+// output terminal.
 #define USB2SPDIF_UAC1_AC_ENTITIES_LEN (TUD_AUDIO10_DESC_INPUT_TERM_LEN \
+    + USB2SPDIF_UAC1_FEATURE_UNIT_LEN                                  \
     + TUD_AUDIO10_DESC_OUTPUT_TERM_LEN)
 
 // 32, 44.1 and 48 kHz.

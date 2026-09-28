@@ -44,10 +44,10 @@ static long trim_ppm(int32_t ppb) {
     return (long)((ppb + (ppb < 0 ? -500 : 500)) / 1000);
 }
 
-// Format documented in tools/diag.py. At most 89 characters in UAC2 mode.
-// UAC1 mode shows '1' in place of the Apple host flag and appends the rate
-// trim and servo lock; counters stop one digit earlier so that it stays
-// within 94.
+// Format documented in tools/diag.py. At most 93 characters in UAC2 mode
+// (rmin and fmax have at most 3 and 4 digits). UAC1 mode shows '1' in place
+// of the Apple host flag and adds the rate trim and servo lock before the
+// volume; counters stop two digits earlier so that it stays within 94.
 static void update_diag_status(void) {
     static uint64_t last_us;
     uint64_t now = time_us_64();
@@ -63,7 +63,7 @@ static void update_diag_status(void) {
     audio_pipeline_get_stats(&ps);
     static const char link_chr[] = {'D', 'I', 'S'};
     bool uac1 = usb_audio_mode() == USB_AUDIO_MODE_UAC1;
-    uint32_t max = uac1 ? 99999u : 999999u;
+    uint32_t max = uac1 ? 9999u : 999999u;
     char buf[96];
     int n = snprintf(buf, sizeof(buf),
                      "%c%c %lu/%u ff%u ur%lu run%d led%d tx%lu ov%lu lt%lu rmin%lu fmax%lu lp%lu",
@@ -76,8 +76,16 @@ static void update_diag_status(void) {
                      clamp_cnt(ps.ring_min, max), clamp_cnt(ps.fifo_max, max),
                      clamp_cnt(ps.loop_max_us, max));
     if (uac1 && n > 0 && (size_t)n < sizeof(buf)) {
-        snprintf(buf + n, sizeof(buf) - (size_t)n, " tr%ld%c", trim_ppm(ps.trim_ppb),
-                 ps.clock_locked ? 'L' : 'U');
+        n += snprintf(buf + n, sizeof(buf) - (size_t)n, " tr%ld%c", trim_ppm(ps.trim_ppb),
+                      ps.clock_locked ? 'L' : 'U');
+    }
+    usb_audio_volume_t v = usb_audio_volume();
+    if (n > 0 && (size_t)n < sizeof(buf)) {
+        if (v.mute) {
+            snprintf(buf + n, sizeof(buf) - (size_t)n, " vM");
+        } else {
+            snprintf(buf + n, sizeof(buf) - (size_t)n, " v%u", v.att_db);
+        }
     }
     diag_set_app_status(buf);
 }

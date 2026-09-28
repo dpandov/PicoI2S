@@ -57,6 +57,9 @@ static struct {
     uint32_t sample_rate;
     uint8_t  resolution;      // from the active or last alt setting
     uint8_t  subslot_bytes;
+    bool     mute;            // Feature Unit mute control
+    bool     vol_silent;      // volume set below the range
+    uint8_t  att_db;          // volume on the 1 dB grid, clamped to the range
     volatile uint32_t events; // pending USB_AUDIO_EVT_* bits
     volatile bool rx_misaligned; // set in the USB interrupt
     bool     rx_halted;       // halt of the current stream already counted
@@ -139,6 +142,13 @@ static bool set_sample_rate(uint32_t rate)
     return true;
 }
 
+static void volume_reset(void)
+{
+    s.mute       = false;
+    s.vol_silent = false;
+    s.att_db     = 0;
+}
+
 void usb_audio_init(usb_audio_mode_t mode)
 {
     memset(&s, 0, sizeof(s));
@@ -147,6 +157,7 @@ void usb_audio_init(usb_audio_mode_t mode)
     s.resolution    = AUDIO_16BIT_RESOLUTION;
     s.subslot_bytes = AUDIO_16BIT_SUBSLOT;
     s.stats.fifo_depth = (uint16_t) CFG_TUD_AUDIO_FUNC_1_EP_OUT_SW_BUF_SZ;
+    volume_reset();
 }
 
 usb_audio_mode_t usb_audio_mode(void)
@@ -183,6 +194,15 @@ uint32_t usb_audio_take_events(void)
     s.events = 0;
     restore_interrupts(irq);
     return evt;
+}
+
+usb_audio_volume_t usb_audio_volume(void)
+{
+    usb_audio_volume_t v = {
+        .mute   = s.mute || s.vol_silent,
+        .att_db = s.att_db,
+    };
+    return v;
 }
 
 void usb_audio_get_stats(usb_audio_stats_t *stats)
@@ -256,6 +276,8 @@ void tud_mount_cb(void)
         s.sample_rate = DEFAULT_SAMPLE_RATE;
         raise_event(USB_AUDIO_EVT_RATE_CHANGED);
     }
+    // Hosts set their volume on connect; one that does not gets 0 dB.
+    volume_reset();
     s.mounted = true;
     raise_event(USB_AUDIO_EVT_MOUNTED);
 }
@@ -321,19 +343,144 @@ static bool clock_set_request(tusb_control_request_t const *p_req, uint8_t selec
 }
 
 //--------------------------------------------------------------------+
+// Feature Unit requests: master mute and volume
+//--------------------------------------------------------------------+
+
+// Same layout in UAC1 and UAC2: mute 1 byte, volume int16 in 1/256 dB.
+// The request codes differ: UAC2 has CUR and RANGE, UAC1 has SET_CUR,
+// GET_CUR, GET_MIN, GET_MAX and GET_RES. TinyUSB routes both to the entity
+// callbacks. Selector codes are the same in both (mute 1, volume 2).
+TU_VERIFY_STATIC((int) AUDIO10_FU_CTRL_MUTE == (int) AUDIO20_FU_CTRL_MUTE &&
+                 (int) AUDIO10_FU_CTRL_VOLUME == (int) AUDIO20_FU_CTRL_VOLUME,
+                 "UAC1 and UAC2 Feature Unit selectors differ");
+TU_VERIFY_STATIC(UAC1_ENTITY_FEATURE_UNIT == UAC2_ENTITY_FEATURE_UNIT,
+                 "Feature Unit IDs differ between the modes");
+
+#define VOLUME_RES      256
+#define VOLUME_MIN      (-(int32_t) USB_AUDIO_ATT_MAX_DB * VOLUME_RES)
+#define VOLUME_MAX      0
+
+typedef audio20_control_range_2_n_t(1) volume_range_t;
+TU_VERIFY_STATIC(sizeof(volume_range_t) <= CFG_TUD_AUDIO_CTRL_BUF_SZ,
+                 "volume RANGE reply does not fit the audio control buffer");
+
+typedef enum {
+    FU_ATTR_CUR,
+    FU_ATTR_MIN,
+    FU_ATTR_MAX,
+    FU_ATTR_RES,
+    FU_ATTR_RANGE,
+    FU_ATTR_NONE,
+} fu_attr_t;
+
+static fu_attr_t fu_get_attr(uint8_t req)
+{
+    if (s.mode == USB_AUDIO_MODE_UAC2) {
+        return req == AUDIO20_CS_REQ_CUR   ? FU_ATTR_CUR
+             : req == AUDIO20_CS_REQ_RANGE ? FU_ATTR_RANGE
+             : FU_ATTR_NONE;
+    }
+    switch (req) {
+    case AUDIO10_CS_REQ_GET_CUR: return FU_ATTR_CUR;
+    case AUDIO10_CS_REQ_GET_MIN: return FU_ATTR_MIN;
+    case AUDIO10_CS_REQ_GET_MAX: return FU_ATTR_MAX;
+    case AUDIO10_CS_REQ_GET_RES: return FU_ATTR_RES;
+    default:                     return FU_ATTR_NONE;
+    }
+}
+
+// Rounds to the 1 dB grid (half a step towards more attenuation). Below
+// the range, including -infinity (0x8000), the output is silent and CUR
+// reads back the minimum.
+static void volume_set(int16_t v)
+{
+    if (v >= VOLUME_MAX) {
+        s.att_db     = 0;
+        s.vol_silent = false;
+        return;
+    }
+    uint32_t const att = ((uint32_t) -(int32_t) v + VOLUME_RES / 2u) / VOLUME_RES;
+    s.vol_silent = att > USB_AUDIO_ATT_MAX_DB;
+    s.att_db     = (uint8_t) (s.vol_silent ? USB_AUDIO_ATT_MAX_DB : att);
+}
+
+static bool reply_i16(uint8_t rhport, tusb_control_request_t const *p_req, int32_t v)
+{
+    audio20_control_cur_2_t r = { .bCur = (int16_t) tu_htole16((uint16_t) (int16_t) v) };
+    return tud_audio_buffer_and_schedule_control_xfer(rhport, p_req, &r, sizeof(r));
+}
+
+static bool fu_get_request(uint8_t rhport, tusb_control_request_t const *p_req, uint8_t selector)
+{
+    fu_attr_t const attr = fu_get_attr(p_req->bRequest);
+
+    if (selector == AUDIO20_FU_CTRL_MUTE && attr == FU_ATTR_CUR) {
+        audio20_control_cur_1_t cur = { .bCur = s.mute ? 1 : 0 };
+        return tud_audio_buffer_and_schedule_control_xfer(rhport, p_req, &cur, sizeof(cur));
+    }
+    if (selector != AUDIO20_FU_CTRL_VOLUME) {
+        return false;
+    }
+    switch (attr) {
+    case FU_ATTR_CUR: return reply_i16(rhport, p_req, -(int32_t) s.att_db * VOLUME_RES);
+    case FU_ATTR_MIN: return reply_i16(rhport, p_req, VOLUME_MIN);
+    case FU_ATTR_MAX: return reply_i16(rhport, p_req, VOLUME_MAX);
+    case FU_ATTR_RES: return reply_i16(rhport, p_req, VOLUME_RES);
+    case FU_ATTR_RANGE: {
+        volume_range_t range;
+        range.wNumSubRanges    = tu_htole16(1);
+        range.subrange[0].bMin =(int16_t) tu_htole16((uint16_t) (int16_t) VOLUME_MIN);
+        range.subrange[0].bMax = (int16_t) tu_htole16((uint16_t) VOLUME_MAX);
+        range.subrange[0].bRes = tu_htole16(VOLUME_RES);
+        return tud_audio_buffer_and_schedule_control_xfer(rhport, p_req, &range, sizeof(range));
+    }
+    default:
+        return false;
+    }
+}
+
+TU_VERIFY_STATIC((int) AUDIO10_CS_REQ_SET_CUR == (int) AUDIO20_CS_REQ_CUR, "SET CUR codes differ");
+
+// UAC1 SET_CUR and UAC2 CUR share the code 0x01; only CUR is writable.
+static bool fu_set_request(tusb_control_request_t const *p_req, uint8_t selector,
+                           uint8_t const *buf)
+{
+    uint16_t const len = tu_le16toh(p_req->wLength);
+    if (p_req->bRequest != AUDIO20_CS_REQ_CUR) {
+        return false;
+    }
+    if (selector == AUDIO20_FU_CTRL_MUTE && len == 1) {
+        s.mute = buf[0] != 0;
+        return true;
+    }
+    if (selector == AUDIO20_FU_CTRL_VOLUME && len == 2) {
+        volume_set((int16_t) tu_le16toh(tu_unaligned_read16(buf)));
+        return true;
+    }
+    return false;
+}
+
+//--------------------------------------------------------------------+
 // Audio class callbacks
 //--------------------------------------------------------------------+
 
-// Only the clock source has controls; everything else is STALLed. Clock
-// source controls are not per channel (UAC2 5.2.5.1).
+// Entities with controls: the Feature Unit (master channel only) and, in
+// UAC2, the clock source (whose controls are not per channel, UAC2
+// 5.2.5.1). Everything else is STALLed. Control requests run in tud_task(),
+// so the volume changes only there (see usb_audio_volume()).
 bool tud_audio_get_req_entity_cb(uint8_t rhport, tusb_control_request_t const *p_request)
 {
-    uint16_t const value  = tu_le16toh(p_request->wValue);
-    uint8_t const  entity = TU_U16_HIGH(tu_le16toh(p_request->wIndex));
+    uint16_t const value   = tu_le16toh(p_request->wValue);
+    uint8_t const  entity  = TU_U16_HIGH(tu_le16toh(p_request->wIndex));
+    uint8_t const  channel = TU_U16_LOW(value);
+
+    if (entity == UAC2_ENTITY_FEATURE_UNIT) {
+        diag_mark(DIAG_MARK_VOLUME_REQ);
+        return channel == 0 && fu_get_request(rhport, p_request, TU_U16_HIGH(value));
+    }
     diag_mark(DIAG_MARK_CLOCK_REQ);
     diag_cnt.clock_req++;
-
-    if (s.mode == USB_AUDIO_MODE_UAC2 && entity == UAC2_ENTITY_CLOCK && TU_U16_LOW(value) == 0) {
+    if (s.mode == USB_AUDIO_MODE_UAC2 && entity == UAC2_ENTITY_CLOCK && channel == 0) {
         return clock_get_request(rhport, p_request, TU_U16_HIGH(value));
     }
     return false;
@@ -342,12 +489,17 @@ bool tud_audio_get_req_entity_cb(uint8_t rhport, tusb_control_request_t const *p
 bool tud_audio_set_req_entity_cb(uint8_t rhport, tusb_control_request_t const *p_request, uint8_t *buf)
 {
     (void) rhport;
-    uint16_t const value  = tu_le16toh(p_request->wValue);
-    uint8_t const  entity = TU_U16_HIGH(tu_le16toh(p_request->wIndex));
+    uint16_t const value   = tu_le16toh(p_request->wValue);
+    uint8_t const  entity  = TU_U16_HIGH(tu_le16toh(p_request->wIndex));
+    uint8_t const  channel = TU_U16_LOW(value);
+
+    if (entity == UAC2_ENTITY_FEATURE_UNIT) {
+        diag_mark(DIAG_MARK_VOLUME_REQ);
+        return channel == 0 && fu_set_request(p_request, TU_U16_HIGH(value), buf);
+    }
     diag_mark(DIAG_MARK_CLOCK_REQ);
     diag_cnt.clock_req++;
-
-    if (s.mode == USB_AUDIO_MODE_UAC2 && entity == UAC2_ENTITY_CLOCK && TU_U16_LOW(value) == 0) {
+    if (s.mode == USB_AUDIO_MODE_UAC2 && entity == UAC2_ENTITY_CLOCK && channel == 0) {
         return clock_set_request(p_request, TU_U16_HIGH(value), buf);
     }
     return false;

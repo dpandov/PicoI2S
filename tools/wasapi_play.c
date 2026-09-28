@@ -7,15 +7,23 @@
 //       -o wasapi_play.exe -lole32
 //
 // Usage: wasapi_play <rate> <16|24> <seconds> [device name part]
+//        wasapi_play --set-volume-max [device name part]
 // The device is the first active render endpoint whose name contains the
-// given part (default "USB to S/PDIF"). Ctrl+C ends the pattern early.
+// given part (default: the bridge's name in either mode). Ctrl+C ends the
+// pattern early.
 //
-// Exit codes: 0 played, 1 usage, 2 device not found, 3 format or stream
-// setup rejected, 4 playback failed.
+// The device has a volume control (Feature Unit), which Windows applies in
+// exclusive mode too, so anything below 100 % or muted is not bit-exact.
+// Playing first sets the endpoint volume to 100 % and unmutes it (a
+// failure is only reported); --set-volume-max does only that.
+//
+// Exit codes: 0 played (or volume set), 1 usage, 2 device not found,
+// 3 format or stream setup rejected, 4 playback failed, 5 volume not set.
 #define COBJMACROS
 #define INITGUID
 #include <windows.h>
 #include <audioclient.h>
+#include <endpointvolume.h>
 #include <functiondiscoverykeys_devpkey.h>
 #include <ksmedia.h>
 #include <mmdeviceapi.h>
@@ -28,9 +36,10 @@
 
 #include "../src/selftest/selftest_pattern.h"
 
-enum { EXIT_OK = 0, EXIT_USAGE, EXIT_NO_DEVICE, EXIT_SETUP, EXIT_PLAYBACK };
+enum { EXIT_OK = 0, EXIT_USAGE, EXIT_NO_DEVICE, EXIT_SETUP, EXIT_PLAYBACK, EXIT_VOLUME };
 
-#define DEFAULT_DEVICE      L"USB to S/PDIF"
+#define DEFAULT_DEVICE      L"USB to S/PDIF"     // UAC2 mode
+#define DEFAULT_DEVICE_UAC1 L"USB to SPDIF"
 #define TRAILING_BUFFERS    4u
 #define EVENT_TIMEOUT_MS    2000u
 
@@ -110,9 +119,10 @@ static void release(void *p) {
     }
 }
 
-// First active render endpoint whose friendly name contains part. With
-// list set, prints every name to stderr instead.
-static IMMDevice *find_device(IMMDeviceEnumerator *en, const wchar_t *part, BOOL list) {
+// First active render endpoint whose friendly name contains part (or alt,
+// if given). With list set, prints every name to stderr instead.
+static IMMDevice *find_device(IMMDeviceEnumerator *en, const wchar_t *part, const wchar_t *alt,
+                              BOOL list) {
     IMMDeviceCollection *col = NULL;
     IMMDevice *found = NULL;
     UINT count = 0;
@@ -131,7 +141,7 @@ static IMMDevice *find_device(IMMDeviceEnumerator *en, const wchar_t *part, BOOL
             v.vt == VT_LPWSTR) {
             if (list) {
                 fprintf(stderr, "  %ls\n", v.pwszVal);
-            } else if (wcsstr(v.pwszVal, part)) {
+            } else if (wcsstr(v.pwszVal, part) || (alt && wcsstr(v.pwszVal, alt))) {
                 printf("device: %ls\n", v.pwszVal);
                 found = d;
                 d = NULL;
@@ -143,6 +153,36 @@ static IMMDevice *find_device(IMMDeviceEnumerator *en, const wchar_t *part, BOOL
     }
     release(col);
     return found;
+}
+
+// Endpoint volume to 100 % and unmuted, read back. False on any failure.
+static BOOL set_volume_max(IMMDevice *dev) {
+    IAudioEndpointVolume *ev = NULL;
+    HRESULT hr = IMMDevice_Activate(dev, &IID_IAudioEndpointVolume, CLSCTX_ALL, NULL, (void **)&ev);
+    if (FAILED(hr)) {
+        report_hr("IMMDevice::Activate(IAudioEndpointVolume)", hr);
+        return FALSE;
+    }
+    float level = 0.0f, db = 0.0f;
+    BOOL mute = TRUE;
+    if (FAILED(hr = IAudioEndpointVolume_SetMasterVolumeLevelScalar(ev, 1.0f, NULL)) ||
+        FAILED(hr = IAudioEndpointVolume_SetMute(ev, FALSE, NULL)) ||
+        FAILED(hr = IAudioEndpointVolume_GetMasterVolumeLevelScalar(ev, &level)) ||
+        FAILED(hr = IAudioEndpointVolume_GetMasterVolumeLevel(ev, &db)) ||
+        FAILED(hr = IAudioEndpointVolume_GetMute(ev, &mute))) {
+        report_hr("endpoint volume", hr);
+        release(ev);
+        return FALSE;
+    }
+    release(ev);
+    printf("volume: %.0f %% (%.1f dB)%s\n", 100.0 * level, db, mute ? ", muted" : "");
+    fflush(stdout);
+    if (level < 1.0f || mute) {
+        fprintf(stderr, "wasapi_play: endpoint volume still %.0f %%%s\n", 100.0 * level,
+                mute ? ", muted" : "");
+        return FALSE;
+    }
+    return TRUE;
 }
 
 static void make_format(WAVEFORMATEXTENSIBLE *wf, uint32_t rate, unsigned bits) {
@@ -282,31 +322,42 @@ done:
 //--------------------------------------------------------------------+
 
 static int usage(void) {
-    fprintf(stderr, "usage: wasapi_play <rate> <16|24> <seconds> [device name part]\n");
+    fprintf(stderr, "usage: wasapi_play <rate> <16|24> <seconds> [device name part]\n"
+                    "       wasapi_play --set-volume-max [device name part]\n");
     return EXIT_USAGE;
 }
 
 int main(int argc, char **argv) {
-    if (argc < 4 || argc > 5) {
+    BOOL volume_only = argc >= 2 && strcmp(argv[1], "--set-volume-max") == 0;
+    int n_args = volume_only ? 1 : 3;
+    if (argc < 1 + n_args || argc > 2 + n_args) {
         return usage();
     }
     char *end;
-    unsigned long rate = strtoul(argv[1], &end, 10);
-    if (*end || rate < 8000 || rate > 384000) {
-        return usage();
-    }
-    unsigned long bits = strtoul(argv[2], &end, 10);
-    if (*end || (bits != 16 && bits != 24)) {
-        return usage();
-    }
-    double seconds = strtod(argv[3], &end);
-    if (*end || !(seconds > 0) || seconds > 1e6) {
-        return usage();
+    unsigned long rate = 0, bits = 0;
+    double seconds = 0;
+    if (!volume_only) {
+        rate = strtoul(argv[1], &end, 10);
+        if (*end || rate < 8000 || rate > 384000) {
+            return usage();
+        }
+        bits = strtoul(argv[2], &end, 10);
+        if (*end || (bits != 16 && bits != 24)) {
+            return usage();
+        }
+        seconds = strtod(argv[3], &end);
+        if (*end || !(seconds > 0) || seconds > 1e6) {
+            return usage();
+        }
     }
     wchar_t part[128] = DEFAULT_DEVICE;
-    if (argc == 5 &&
-        !MultiByteToWideChar(CP_ACP, 0, argv[4], -1, part, (int)(sizeof(part) / sizeof(part[0])))) {
-        return usage();
+    const wchar_t *alt = DEFAULT_DEVICE_UAC1;
+    if (argc == 2 + n_args) {
+        if (!MultiByteToWideChar(CP_ACP, 0, argv[1 + n_args], -1, part,
+                                 (int)(sizeof(part) / sizeof(part[0])))) {
+            return usage();
+        }
+        alt = NULL;
     }
 
     SetConsoleCtrlHandler(on_ctrl, TRUE);
@@ -325,12 +376,18 @@ int main(int argc, char **argv) {
     if (FAILED(hr)) {
         report_hr("CoCreateInstance(MMDeviceEnumerator)", hr);
         result = EXIT_SETUP;
-    } else if (!(dev = find_device(en, part, FALSE))) {
+    } else if (!(dev = find_device(en, part, alt, FALSE))) {
         fprintf(stderr, "wasapi_play: no active playback device with \"%ls\" in its name; found:\n",
                 part);
-        find_device(en, part, TRUE);
+        find_device(en, part, alt, TRUE);
         result = EXIT_NO_DEVICE;
+    } else if (volume_only) {
+        result = set_volume_max(dev) ? EXIT_OK : EXIT_VOLUME;
     } else {
+        if (!set_volume_max(dev)) {
+            fprintf(stderr, "wasapi_play: warning: playing without full volume, "
+                            "not bit-exact\n");
+        }
         WAVEFORMATEXTENSIBLE wf;
         make_format(&wf, (uint32_t)rate, (unsigned)bits);
         if (FAILED(open_stream(dev, &wf, &ac))) {

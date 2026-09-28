@@ -9,6 +9,12 @@
 // The output starts when a stream has pre-filled, and stops (pin idle) after
 // 3 s without audio samples: stream closed, or open with nothing arriving.
 // Digital silence inside an open stream counts as audio.
+//
+// The host's volume (usb_audio_volume()) is applied on the way into the
+// ring, ramped 1 dB per chunk read: at 0 dB the samples pass unchanged;
+// below it they are scaled, rounded to 24 bits and sent as 24-bit words
+// whatever the stream depth. Muted streams send zeros and still count as
+// audio.
 #pragma once
 
 #include <stdbool.h>

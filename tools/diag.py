@@ -34,13 +34,17 @@ Output fields:
                 cancel the PLL error, plus the host clock offset against the
                 Pico crystal. L = clock servo locked, U = acquiring or not
                 playing
+    v<dB>/vM    host volume (Feature Unit): attenuation in dB, 0 to 64, or M
+                when muted (or set below -64 dB). v0 is bit-perfect; below
+                0 dB the output is scaled and flagged as 24-bit. Last token
+                in both modes
     ur, ov, lt and rmin count from the start of the current or last stream
     (open or format change); fmax and lp from when it began playing, so the
     start-up (pre-roll, clock switch) is excluded. Counters stop at 999999
-    (99999 in UAC1 mode).
+    (9999 in UAC1 mode).
 
-    e.g. UAC2:  So 48000/24 ff4712 ur0 run1 led1 tx48000 ov0 lt0 rmin144 fmax5240 lp212
-         UAC1:  S1 44100/16 ff4935 ur0 run1 led1 tx44100 ov0 lt0 rmin144 fmax5400 lp212 tr361L
+    e.g. UAC2:  So 48000/24 ff4712 ur0 run1 led1 tx48000 ov0 lt0 rmin144 fmax5240 lp212 v0
+         UAC1:  S1 44100/16 ff4935 ur0 run1 led1 tx44100 ov0 lt0 rmin144 fmax5400 lp212 tr361L v12
 """
 import sys
 import time

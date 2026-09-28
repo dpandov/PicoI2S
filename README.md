@@ -84,7 +84,8 @@ USB host --iso OUT--> TinyUSB FIFO --main loop--> PCM ring --DMA IRQ: BMC encode
 ```
 
 - **USB**: UAC2, two alternate settings (16-bit and 24-bit stereo), sample
-  rate selected through the clock source entity. Asynchronous mode with an
+  rate selected through the clock source entity, master mute and volume
+  through a Feature Unit (see [Volume](#volume)). Asynchronous mode with an
   explicit feedback endpoint; the Pico is the audio clock master.
 - **Clocking**: the system PLL is switched between two settings so the PIO
   divider is an integer for each sample-rate family; the fractional divider
@@ -116,6 +117,34 @@ USB host --iso OUT--> TinyUSB FIFO --main loop--> PCM ring --DMA IRQ: BMC encode
   idle, no carrier), letting the receiver drop lock, auto-switch inputs or
   go to standby. It restarts when the host streams again.
 
+## Volume
+
+The device has a volume control (a USB audio Feature Unit with master mute
+and volume) because iOS only offers its volume slider for USB audio devices
+that have one; without it the slider is locked at maximum. Windows and
+Android also use it when present.
+
+- Range 0 to -64 dB in 1 dB steps, plus mute. The volume is applied
+  digitally in the bridge, with integer arithmetic.
+- At 0 dB (unmuted) the samples pass unchanged: the output stays
+  bit-perfect, 16-bit streams go out as 16-bit words.
+- Below 0 dB the samples are scaled and rounded to 24 bits, and the S/PDIF
+  channel status then declares 24-bit words, also for 16-bit streams (an
+  attenuated 16-bit sample has more than 16 significant bits). Volume
+  changes never interrupt the output.
+- Changes ramp towards the new level by 1 dB per chunk of about 2 ms, like
+  the PCM2704, so a large jump, a mute or an unmute fades instead of
+  stepping; a new stream starts at the current level.
+- Mute fades to digital silence; the stream still counts as audio (LED on,
+  output running).
+- 0 dB, unmuted at power-up and on every connection; hosts then set their
+  own level.
+- The test-tone build (`-DUSB2SPDIF_TEST_TONE=ON`) ignores it.
+
+In WASAPI exclusive mode Windows still applies the device's volume
+control, so for bit-perfect playback set the device's Windows volume to
+100 % and unmute it. The test tools do that before they play.
+
 ## UAC1 mode
 
 Many TVs, set-top boxes, car head units and Windows before 10 (1703) only
@@ -123,13 +152,13 @@ drive USB Audio Class 1.0 devices, typically the PCM2704-style USB DACs.
 With GP5 grounded at power-up the bridge presents itself like one of those:
 
 - USB Audio Class 1.0, no interface association (a plain composite
-  device), its own USB ID 1209:0002 and the product name
-  "USB to S/PDIF (UAC1)". Windows binds its built-in `usbaudio.sys`.
+  device), its own USB ID 1209:0002 and the name "USB to SPDIF" (UAC2:
+  "USB to S/PDIF"). Windows binds its built-in `usbaudio.sys`.
 - One streaming format: 16-bit stereo at 32, 44.1 or 48 kHz, set by the
   host through the endpoint's sampling-frequency control. A host that never
   sets the rate gets 48 kHz.
-- No volume control on the device, as in UAC2: the output stays
-  bit-perfect and the host applies its volume in software.
+- Master mute and volume like the PCM2704, the same as in UAC2 (see
+  [Volume](#volume)).
 - Adaptive isochronous endpoint without a feedback endpoint. The host sends
   at its own clock and the bridge follows it: a control loop on the USB
   receive buffer level trims the S/PDIF rate in steps of parts per billion
@@ -207,7 +236,8 @@ In UAC1 mode use `--pid 0x0002`.
 
 ## Testing on Windows
 
-The device appears as an audio output named "SPDIF Interface (USB to S/PDIF)".
+The device appears as an audio output named "SPDIF Interface (USB to S/PDIF)"
+("USB to SPDIF" in UAC1 mode).
 Windows may make it the default playback device when first plugged in.
 The host tools detect the mode from the diagnostic string; in UAC1 mode they
 test 32 / 44.1 / 48 kHz at 16 bit and report the adaptive clock's rate trim.
@@ -218,6 +248,8 @@ Host tools in `tools/` (`pip install -r tools/requirements.txt`):
   exclusive mode and checks, through the device's diagnostic string, that the
   device runs the requested format with no underruns and the S/PDIF output at
   the stream rate, and that the output stops 3 s after playback ends.
+  Like `tools/selftest.py`, it first sets the device's Windows volume to
+  100 % and unmuted, and fails while the device reports an attenuation.
 - `tools/diag.py` reads the diagnostic string: previous-boot crash record
   (panic, fault or hang location) and live stream status. This works without
   a debug probe or UART.
@@ -277,11 +309,17 @@ of it.
 - Robustness: a late S/PDIF interrupt (tested with interrupts masked up to
   10 ms) repeats the last block with valid framing and resyncs by itself;
   USB overruns and underruns are detected and counted; logging never
-  blocks. Short soak (10 min each at 96/24 and 44.1/16) bit-exact with
-  zero glitches. Long soak pending.
+  blocks. Long soak: 4 h at 96 kHz / 24-bit in UAC2 mode and 4 h at
+  44.1 kHz / 16-bit in UAC1 mode, bit-exact with zero glitches, no
+  underruns, overruns or late interrupts (UAC1 trim within 2 ppm of
+  steady, locked in every read).
 - USB stack: TinyUSB 0.21. UAC2 re-verified on Windows (all formats
-  bit-exact, rapid stream open/close cycles); iPad check of the new Apple
-  feedback path pending.
+  bit-exact, rapid stream open/close cycles) and on iPad / iPhone (Apple
+  feedback path).
+- Volume control (step 8): implemented and host-tested (exact gain
+  arithmetic, word-length switching, request handling in both modes);
+  verified on Windows (both drivers), iPad/iPhone and an Android streamer
+  (Eversolo T8) in both modes.
 - UAC1 mode: verified on Windows 11 with the classic usbaudio driver: all
   3 rates bit-exact, the S/PDIF clock follows the host within a few ppm,
   5-minute soak with the trim steady to 1 ppm, pause/resume without a

@@ -25,6 +25,8 @@
 #define DMA_FRAMES    (2u * SPDIF_TX_BUFFER_FRAMES)
 #define READ_FRAMES   SPDIF_TX_BUFFER_FRAMES
 #define IDLE_STOP_US  3000000u
+// Ramped attenuation value for silence (mute): one step below -64 dB.
+#define ATT_SILENT    (USB_AUDIO_ATT_MAX_DB + 1u)
 
 _Static_assert((RING_FRAMES & RING_MASK) == 0, "ring size must be a power of two");
 _Static_assert(RING_TARGET <= RING_FRAMES, "ring target exceeds the ring");
@@ -48,6 +50,7 @@ typedef struct {
     bool     first_play;      // not played yet since the stream started
     bool     loop_reset;      // reset the loop maximum next iteration
     uint64_t last_audio_us;   // stream samples last moved into the ring
+    uint8_t  att;             // attenuation applied to the ring, 0 .. ATT_SILENT
     uint32_t start_failures;
     uint32_t overruns_base;   // counts when the stream started
     uint32_t late_irqs_base;
@@ -94,10 +97,91 @@ static void ring_flush(void) {
     ring_rd = ring_wr;
 }
 
+// Host volume (Feature Unit), applied here in the main loop only. Q31 gain
+// per dB of attenuation: round(2^31 x 10^(-k/20)), 0 dB saturated.
+static const int32_t gain_q31[] = {
+    2147483647, 1913946816, 1705806895, 1520301996, 1354970580,
+    1207618800, 1076291389,  959245710,  854928639,  761955951,
+     679093957,  605243126,  539423504,  480761704,  428479319,
+     381882595,  340353221,  303340128,  270352174,  240951628,
+     214748365,  191394682,  170580690,  152030200,  135497058,
+     120761880,  107629139,   95924571,   85492864,   76195595,
+      67909396,   60524313,   53942350,   48076170,   42847932,
+      38188260,   34035322,   30334013,   27035217,   24095163,
+      21474836,   19139468,   17058069,   15203020,   13549706,
+      12076188,   10762914,    9592457,    8549286,    7619560,
+       6790940,    6052431,    5394235,    4807617,    4284793,
+       3818826,    3403532,    3033401,    2703522,    2409516,
+       2147484,    1913947,    1705807,    1520302,    1354971,
+};
+
+_Static_assert(sizeof(gain_q31) / sizeof(gain_q31[0]) == USB_AUDIO_ATT_MAX_DB + 1u,
+               "one gain per dB of the volume range");
+
+// Scales a left-justified sample and rounds the exact product once, to the
+// 24 bits the encoder sends (bits 31..8). Only used below 0 dB, where the
+// result cannot overflow, so no saturation.
+static int32_t scale_sample(int32_t sample, int32_t gain) {
+    int64_t y = ((int64_t)sample * gain + (1ll << 38)) >> 39;
+    return (int32_t)y * 256;
+}
+
+// Attenuation the host asks for; mute is ATT_SILENT.
+static uint8_t att_target(usb_audio_volume_t v) {
+    return v.mute ? (uint8_t)ATT_SILENT : v.att_db;
+}
+
+// Moves the applied attenuation 1 dB towards the target, once per chunk
+// (96 frames when steady, 2 ms at 48 kHz), so a jump or a mute fades as on
+// the PCM2704.
+static void att_step(uint8_t target) {
+    if (p.att < target) {
+        p.att++;
+    } else if (p.att > target) {
+        p.att--;
+    }
+}
+
+// Attenuates or mutes n frames just written at ring index wr.
+static void apply_volume(uint32_t wr, uint32_t n, uint8_t att) {
+    int32_t gain = att == ATT_SILENT ? 0 : gain_q31[att];
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t k = ((wr + i) & RING_MASK) * 2u;
+        ring[k]      = scale_sample(ring[k], gain);
+        ring[k + 1u] = scale_sample(ring[k + 1u], gain);
+    }
+}
+
+// S/PDIF word length: attenuated samples carry 24 significant bits,
+// whatever the stream's depth. Follows the applied attenuation, i.e. the
+// samples in the ring.
+static uint8_t output_word_bits(uint8_t resolution) {
+    return p.att != 0 ? 24u : resolution;
+}
+
+// Channel-status word length of a running output, from the stream depth
+// and the applied volume (output_word_bits()). Updated in place: a volume
+// change never restarts the output. The 24 -> 16 switch leads the
+// attenuated audio still in the ring and DMA buffers (up to 12 ms), which
+// is harmless: the word length only tells the receiver how many bits are
+// significant.
+static void sync_word_bits(void) {
+    if (!spdif_tx_running() || p.bits == 0) {
+        return;
+    }
+    uint8_t bits = output_word_bits(p.bits);
+    if (spdif_tx_word_bits() != bits) {
+        spdif_tx_set_word_bits(bits);
+    }
+}
+
 // Moves stream frames into the ring, up to RING_TARGET. Returns the count.
+// Each read is a chunk of up to READ_FRAMES with one ramp step. At 0 dB the
+// samples are copied unchanged (bit-perfect).
 static uint32_t pump(const usb_audio_format_t *f) {
     uint32_t frame_bytes = 2u * f->subslot_bytes;
     uint32_t moved = 0;
+    uint8_t target = att_target(usb_audio_volume());
     for (;;) {
         uint32_t wr = ring_wr;
         uint32_t level = wr - ring_rd;
@@ -126,6 +210,13 @@ static uint32_t pump(const usb_audio_format_t *f) {
                 ring[k + 1u] = rx.s32[2u * i + 1u];
             }
         }
+        att_step(target);
+        if (p.att != 0) {
+            apply_volume(wr, n, p.att);
+        }
+        // Before the chunk is published, so 24 bits are flagged by the time
+        // the first attenuated samples go out.
+        sync_word_bits();
         __compiler_memory_barrier();
         ring_wr = wr + n;
         moved += n;
@@ -192,13 +283,9 @@ static void stream_started(const usb_audio_format_t *f, uint64_t now) {
     // An opening stream counts as audio, so a running output is not stopped
     // during its pre-roll.
     p.last_audio_us = now;
-    if (!spdif_tx_running()) {
-        return;
-    }
-    if (spdif_tx_sample_rate() != f->sample_rate) {
+    // Same rate, other depth: sync_word_bits() updates the running output.
+    if (spdif_tx_running() && spdif_tx_sample_rate() != f->sample_rate) {
         output_stop();
-    } else if (spdif_tx_word_bits() != f->resolution) {
-        spdif_tx_set_word_bits(f->resolution);
     }
 }
 
@@ -224,6 +311,9 @@ static void servo_start(const usb_audio_format_t *f, uint32_t depth, bool fresh)
 // Pre-roll done: fill the ring and start the output if it is stopped.
 static void begin_playing(const usb_audio_format_t *f, uint32_t depth, uint64_t now) {
     bool start = !spdif_tx_running();
+    // Starts at the requested volume without a ramp: silence precedes it
+    // (pre-roll, underrun or stopped output).
+    p.att = att_target(usb_audio_volume());
     if (start) {
         audio_family_t fam = audio_clock_family(f->sample_rate);
         if (fam != audio_clock_current_family()) {
@@ -234,7 +324,8 @@ static void begin_playing(const usb_audio_format_t *f, uint32_t depth, uint64_t 
     }
     top_up(f, now);
     if (start) {
-        if (!spdif_tx_start(f->sample_rate, f->resolution, ring_source)) {
+        uint8_t bits = output_word_bits(f->resolution);
+        if (!spdif_tx_start(f->sample_rate, bits, ring_source)) {
             p.start_failures++;
             p.hold = true;
             ring_flush();
@@ -243,7 +334,7 @@ static void begin_playing(const usb_audio_format_t *f, uint32_t depth, uint64_t 
             return;
         }
         top_up(f, now);   // the start pre-filled two buffers from the ring
-        log_printf("spdif: %lu Hz %u-bit\n", (unsigned long)f->sample_rate, f->resolution);
+        log_printf("spdif: %lu Hz %u-bit\n", (unsigned long)f->sample_rate, bits);
     }
     if (adaptive()) {
         servo_start(f, depth, start);
@@ -300,6 +391,9 @@ void audio_pipeline_task(void) {
         // The ring drains, then the output sends silence.
         p.playing = false;
     }
+    // Follows a change of the stream depth; volume changes are synced per
+    // chunk in pump().
+    sync_word_bits();
 
     if (ring_short) {
         ring_short = false;

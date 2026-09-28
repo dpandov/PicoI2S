@@ -32,6 +32,12 @@ underrun / overrun / late-interrupt counters (ur, ov, lt) did not increase.
 After the sweep the output must send silence 2 s after the stream closed and
 be stopped (line idle low) 4.5 s after.
 
+The device has a volume control that Windows applies even in exclusive
+mode, so the script first sets the Windows volume of the device to 100 %
+and unmutes it (wasapi_play --set-volume-max; a failure is only a warning),
+and every read fails while the device reports an attenuation or mute
+(diagnostic token v<dB> other than v0, or vM).
+
 Soak: plays one format continuously and reads every few seconds; any failed
 check or counter increase is logged with a timestamp. Passes only with zero
 events. Bad windows are counted on the device, so a glitch between two
@@ -105,6 +111,10 @@ TONE_RATE, TONE_BITS = 48000, 24
 # Player
 #--------------------------------------------------------------------------
 
+class PlayerBuildError(Exception):
+    pass
+
+
 def build_player():
     """Builds tools/build/wasapi_play.exe if missing or out of date."""
     if os.path.exists(PLAYER_EXE) and all(
@@ -113,16 +123,35 @@ def build_player():
     try:
         import ziglang  # noqa: F401
     except ImportError:
-        sys.exit("building wasapi_play needs the ziglang package: "
-                 "pip install -r tools/requirements.txt")
+        raise PlayerBuildError("building wasapi_play needs the ziglang package: "
+                               "pip install -r tools/requirements.txt")
     os.makedirs(os.path.dirname(PLAYER_EXE), exist_ok=True)
     print("building tools/build/wasapi_play.exe ...")
     cmd = [sys.executable, "-m", "ziglang", "cc", "-target", "x86_64-windows-gnu", "-O2",
            "-std=c11", "-o", PLAYER_EXE, PLAYER_SRC, "-lole32"]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
-        sys.exit(f"wasapi_play build failed:\n{r.stdout}{r.stderr}")
+        raise PlayerBuildError(f"wasapi_play build failed:\n{r.stdout}{r.stderr}")
     return PLAYER_EXE
+
+
+def set_volume_max(exe=None, device=None):
+    """Sets the device's Windows volume to 100 % and unmutes it. The device
+    has a volume control, which Windows applies in exclusive mode too, so
+    anything else is not bit-exact. Warns and returns False on failure."""
+    try:
+        exe = exe or build_player()
+        r = subprocess.run([exe, "--set-volume-max"] + ([device] if device else []),
+                           capture_output=True, text=True, timeout=10)
+    except (PlayerBuildError, OSError, subprocess.SubprocessError) as e:
+        print(f"warning: could not set the device volume to 100 %: {e}")
+        return False
+    if r.returncode != 0:
+        print(f"warning: could not set the device volume to 100 % (exit {r.returncode}): "
+              f"{(r.stderr or r.stdout).strip()}")
+        return False
+    print(r.stdout.strip().splitlines()[-1] if r.stdout.strip() else "volume: set")
+    return True
 
 
 class Player:
@@ -197,6 +226,10 @@ def parse_diag(s):
         if m:
             d["trim"], d["locked"] = int(m.group(1)), m.group(2) == "L"
             continue
+        m = re.fullmatch(r"v(\d+|M)", tok)
+        if m:
+            d["volume"] = "M" if m.group(1) == "M" else int(m.group(1))
+            continue
         m = re.fullmatch(r"(\d+)/(\d+)", tok)
         if m:
             d["rate"], d["bits"] = int(m.group(1)), int(m.group(2))
@@ -260,7 +293,19 @@ def check_device(dg, rate, bits, boots):
     tx = dg["fields"].get("tx")
     if tx is not None and tx != rate:
         f.append(f"app tx{tx}")
+    f += check_volume(dg)
     return f
+
+
+def check_volume(dg):
+    """Failure reasons from the device volume: bit-exact needs 0 dB, unmuted
+    (firmware without a volume control reports none)."""
+    vol = dg.get("volume") if dg else None
+    if vol == "M":
+        return ["device muted (vM): unmute it in Windows"]
+    if vol:
+        return [f"device volume -{vol} dB (v{vol}): set the Windows volume to 100 %"]
+    return []
 
 
 def counter_increases(a, b):
@@ -282,6 +327,8 @@ def app_summary(dg):
     if not dg:
         return ""
     s = " ".join(f"{k}{v}" for k, v in dg["fields"].items() if k not in ("tx", "ff"))
+    if "volume" in dg:
+        s += f" v{dg['volume']}"
     if "trim" in dg:
         s += f" trim {dg['trim']:+d} ppm {'locked' if dg['locked'] else 'not locked'}"
     return s
@@ -518,7 +565,7 @@ def main():
                     help="soak bit depth (default 24; 16 in UAC1 mode)")
     ap.add_argument("--interval", type=float, default=5.0, metavar="S",
                     help="soak read interval (default 5 s)")
-    ap.add_argument("--device", help="playback device name part (default 'USB to S/PDIF')")
+    ap.add_argument("--device", help="playback device name part (default: the bridge in either mode)")
     ap.add_argument("--status", action="store_true", help="print both reports once and exit")
     args = ap.parse_args()
 
@@ -556,7 +603,11 @@ def main():
 
     if sys.platform != "win32":
         sys.exit("the pattern player needs Windows (WASAPI)")
-    exe = build_player()
+    try:
+        exe = build_player()
+    except PlayerBuildError as e:
+        sys.exit(str(e))
+    set_volume_max(exe, args.device)
     if args.soak:
         ok = run_soak(rd, exe, args, boots)
     else:

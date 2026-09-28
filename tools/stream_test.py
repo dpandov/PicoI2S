@@ -16,6 +16,13 @@ device offers 32 / 44.1 / 48 kHz at 16 bit only, so only those are played;
 the S/PDIF rate trim of the adaptive clock and the clock servo lock are
 reported per format.
 
+The device has a volume control that Windows applies in exclusive mode, so
+the Windows volume of the device is first set to 100 % and unmuted with
+tools/wasapi_play.exe --set-volume-max (built on first use, as by
+tools/selftest.py; if that fails the test warns and continues). A
+combination fails while the device reports an attenuation or mute
+(diagnostic token v<dB> other than v0, or vM).
+
     pip install sounddevice numpy pyusb libusb-package
     python tools/stream_test.py
 """
@@ -28,6 +35,7 @@ import numpy as np
 import sounddevice as sd
 
 from diag import read_diag
+from selftest import set_volume_max
 
 RATES = [32000, 44100, 48000, 88200, 96000]
 BITS = [16, 24]
@@ -42,7 +50,8 @@ IDLE_CHECK_AT = (2.0, 4.0)
 def find_output():
     wasapi = next(i for i, h in enumerate(sd.query_hostapis()) if "WASAPI" in h["name"])
     for i, d in enumerate(sd.query_devices()):
-        if d["hostapi"] == wasapi and "S/PDIF" in d["name"] and d["max_output_channels"] >= 2:
+        if (d["hostapi"] == wasapi and d["max_output_channels"] >= 2 and
+                ("USB to S/PDIF" in d["name"] or "USB to SPDIF" in d["name"])):
             return i
     sys.exit("usb2spdif WASAPI output not found")
 
@@ -55,8 +64,10 @@ def tone(rate, bits):
 
 
 def status_fields(status):
-    """'So 48000/24 ff4656 ur0 run1 led1 tx48000 ov0 ...' -> dict of fields.
-    UAC1 mode: second character '1', and 'tr<ppm>L|U' at the end."""
+    """'So 48000/24 ff4656 ur0 run1 led1 tx48000 ov0 ... v0' -> dict of fields.
+    UAC1 mode: second character '1', and 'tr<ppm>L|U' before the volume.
+    Volume: 'volume' is the attenuation in dB or 'M' (muted), absent with
+    firmware that has no volume control."""
     tok = status.split()
     f = {"link": tok[0][:1] if tok else "", "format": tok[1] if len(tok) > 1 else "",
          "uac1": tok[0][1:2] == "1" if tok else False}
@@ -64,6 +75,10 @@ def status_fields(status):
         m = re.fullmatch(r"tr(-?\d+)([LU])", t)
         if m:
             f["trim"], f["locked"] = int(m.group(1)), m.group(2) == "L"
+            continue
+        m = re.fullmatch(r"v(\d+|M)", t)
+        if m:
+            f["volume"] = "M" if m.group(1) == "M" else int(m.group(1))
             continue
         m = re.fullmatch(r"([a-z]+)(\d+)", t)
         if m:
@@ -75,7 +90,16 @@ def playing_ok(status, rate, bits):
     f = status_fields(status)
     return (f["link"] == "S" and f["format"] == f"{rate}/{bits}" and "ff" in f
             and f.get("ur") == 0 and f.get("ov") == 0 and f.get("run") == 1
-            and f.get("led") == 1 and f.get("tx") == rate)
+            and f.get("led") == 1 and f.get("tx") == rate and f.get("volume", 0) == 0)
+
+
+def volume_note(status):
+    vol = status_fields(status).get("volume", 0)
+    if vol == "M":
+        return "  (device muted: unmute it in Windows)"
+    if vol:
+        return f"  (device volume -{vol} dB: set the Windows volume to 100 %)"
+    return ""
 
 
 def sample_after(backend, t0, times):
@@ -95,6 +119,7 @@ def main():
     rates, bits_list = (UAC1_RATES, UAC1_BITS) if uac1 else (RATES, BITS)
     print(f"device in {'UAC1' if uac1 else 'UAC2'} mode: {status}")
     out = find_output()
+    set_volume_max()
     all_ok = True
     lp_max = 0
     # Rate outer, bits inner: every rate step changes the clock family
@@ -119,7 +144,8 @@ def main():
                 clock = (f", trim {last.get('trim')} ppm "
                          f"{'locked' if last.get('locked') else 'not locked'}")
             print(f"{rate:6d} Hz {bits}-bit: {'PASS' if ok else 'FAIL'}   "
-                  f"lp {lp} us, lt {lt}, rmin {rmin}{clock}   {samples[-1]}")
+                  f"lp {lp} us, lt {lt}, rmin {rmin}{clock}   {samples[-1]}"
+                  f"{volume_note(samples[-1])}")
 
     # 3 s of silence after the stream ends, then no carrier.
     running, stopped = sample_after(backend, time.time(), IDLE_CHECK_AT)

@@ -23,6 +23,7 @@ enum {
     DIAG_MARK_CLOSE_EP,
     DIAG_MARK_FB_PARAMS,
     DIAG_MARK_CLOCK_REQ,
+    DIAG_MARK_VOLUME_REQ,
 };
 
 // Live counters, incremented by the code they describe.

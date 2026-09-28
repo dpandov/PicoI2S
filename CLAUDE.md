@@ -150,8 +150,7 @@ generated analysis go in `scratch/` at the repository root. This folder and
      the PC plays a test pattern; injected with `ld --wrap`, no hooks in
      `src/`.
 5. (merged into phase B)
-6. Robustness (underrun / overrun), long-run soak test. (done except the
-   long soak, which runs after step 7)
+6. Robustness (underrun / overrun), long-run soak test. (done)
    - Late S/PDIF DMA interrupt (> 1 buffer): detect, recover, count.
    - Main-loop latency: TinyUSB re-arms the ISO OUT endpoint from the main
      loop, so a stall of ~1 ms at 96 kHz loses a packet. Measure the worst
@@ -167,15 +166,19 @@ generated analysis go in `scratch/` at the repository root. This folder and
      pattern with a native WASAPI exclusive player (PortAudio is not
      bit-exact) and checks it bit-exact.
    - Soak: short soak (10 min each at 96/24 and 44.1/16, zero glitches)
-     before committing this phase; the long soak runs after step 7.
+     before committing this phase; long soak after step 8 (done: 4 h at
+     96/24 in UAC2 and 4 h at 44.1/16 in UAC1 on the step-8 firmware,
+     `tools/selftest.py --soak 240`, 480 reads each, zero events, no
+     underruns, overruns or late interrupts; UAC1 trim +332..+334 ppm,
+     locked in every read).
      Stress: rapid format changes, open/close loops, replug, host
      sleep/resume, host CPU load.
    - Hosts: Android (functional: plays, lock, LED, 3-s stop; Eversolo T8
      played 2 h clean on the phase-4 firmware). Linux and macOS later.
 7. UAC1 mode selected by a configuration pin at boot. Target: TVs and old
    Windows (PCM2704-style compatibility). (done and verified on Windows 11
-   in both modes; iPad (UAC2 Apple feedback path), TV and the long soak
-   pending)
+   in both modes and on iPad / iPhone (UAC2 Apple feedback path); long
+   soak done in both modes (step 6); TV pending)
    - Upgrade TinyUSB to 0.21 (UAC1 device support since 0.20; ISO
      transfers handled in the ISR since 0.19, which removes the main-loop
      re-arm latency risk), as a git submodule pinned to the release tag
@@ -189,8 +192,10 @@ generated analysis go in `scratch/` at the repository root. This folder and
      32 / 44.1 / 48 kHz (Format Type I, discrete), adaptive ISO OUT
      endpoint, no feedback endpoint. Rate via endpoint SET_CUR
      (`tud_audio_set_req_ep_cb()`). (done: device class 0 without IAD, PID
-     0x0002, product "USB to S/PDIF (UAC1)", no Feature Unit, S/PDIF output
-     terminal, EP 196 bytes; the reset interface and BOS / MS OS 2.0 stay.
+     0x0002, product and audio function string "USB to SPDIF" (UAC2:
+     "USB to S/PDIF"; Windows and iOS show the function string, Android
+     the product; the host tools match both names), no Feature Unit (added in
+     step 8), S/PDIF output terminal, EP 196 bytes; the reset interface and BOS / MS OS 2.0 stay.
      GET_CUR answered, other EP requests STALLed. 48 kHz until the host
      sets a rate, reset on every enumeration. UAC2 descriptors unchanged
      byte for byte.)
@@ -214,9 +219,57 @@ generated analysis go in `scratch/` at the repository root. This folder and
      cannot finish before the rate arrives unless the host streams at the
      old rate first, which then costs one extra restart.
    - Diagnostic string: `1` in place of the Apple flag, `tr<ppm><L|U>`
-     (trim, servo lock) appended, counters capped at 99999 in UAC1 mode.
+     (trim, servo lock) appended, counters capped at 9999 in UAC1 mode
+     (99999 before step 8 added the volume token).
      Tools detect the mode from it and accept PID 0x0002.
-   - Then the long soak.
+   - Then the long soak (done, see step 6).
+8. Volume control (mute + volume Feature Unit in both modes). (done;
+   verified on Windows in both modes, iPad/iPhone and the Eversolo T8; a
+   TV not yet)
+   - Why: iOS only offers a volume control for a USB audio device that
+     advertises one; without a Feature Unit the slider is locked at
+     maximum. Windows and Android scale in software instead.
+   - Master mute and master volume, -64..0 dB in 1 dB steps (UAC units of
+     1/256 dB: RANGE min -16384, max 0, res 256; below the range = mute).
+     Reset to 0 dB, unmuted, at boot; hosts set what they want on connect.
+   - Applied digitally in the pipeline's main-loop conversion, never in
+     the IRQ: 0 dB is a bit-perfect pass-through (the multiply is skipped);
+     below 0 dB the 32-bit left-justified sample is scaled by an integer
+     Q31 gain table (65 entries, generated offline, no runtime float),
+     rounded to 24 bits, and the S/PDIF word length becomes 24 for any
+     attenuated stream (16-bit input included). Mute = zeros; a muted
+     stream is still audio (output keeps running, LED on).
+   - UAC1 Feature Unit follows the PCM2704: mute + volume, master only.
+   - The Windows test tools set the endpoint volume to maximum and unmute
+     before any bit-exact check, since in exclusive mode Windows applies
+     the device's own volume control.
+   - bcdDevice bumped so hosts re-read the changed topology.
+   - Ramp (done; verified on Windows in both modes): PCM2704-style, the
+     applied attenuation (0..65, 65 = silence) moves 1 dB per chunk read
+     in `pump()` (up to 96 frames, 2 ms at 48 kHz) towards the host's
+     target (mute = 65), so a jump, mute or unmute fades. The chunk uses
+     the value after its step. A new stream (`begin_playing()`) starts at
+     the target, no fade-in. No samples, no steps (a change in the silence
+     tail waits for the next stream). The diag token shows the target.
+     Master-only control stays (the PCM2704 is per channel).
+   - Implementation (done: Feature Unit ID 2 between the input and output
+     terminals; UAC2 bmaControls master mute + volume read/write, channels
+     none; UAC1 bControlSize 1, master 0x03, channels 0 (PCM2704 layout).
+     TinyUSB 0.21 routes the Feature Unit requests of both classes to
+     `tud_audio_get/set_req_entity_cb()`; UAC1 uses its own request codes
+     (GET_CUR/MIN/MAX/RES, SET_CUR). Only the master channel; anything else
+     STALLs. Received volumes are rounded to the 1 dB grid; below -64 dB
+     (including -inf, 0x8000) the output is silent and CUR reads -64 dB.
+     `usb_audio_volume()` feeds `pump()`: applied 0 dB is the unchanged
+     copy; otherwise one rounding of the Q31 product to 24 bits (no
+     saturation needed at <= -1 dB). The word length follows the applied
+     attenuation (24 bits while it is not 0, mute included) and is updated
+     in place per chunk before the chunk is published
+     (`sync_word_bits()`); the pipeline's new-stream logic stays keyed on
+     the USB format. The 24 -> 16 switch leads the attenuated samples
+     still buffered (up to about 12 ms), which is harmless. Diagnostic
+     token `v<dB>` / `vM` last in both modes; UAC1 counters capped at 9999
+     to fit 95 characters.)
 
 ## Known TinyUSB issues (0.21.0)
 

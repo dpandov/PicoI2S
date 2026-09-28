@@ -27,6 +27,18 @@ typedef struct {
     uint8_t  subslot_bytes;   // bytes per sample in the stream: 2 or 4
 } usb_audio_format_t;
 
+// Feature Unit volume range: 0 dB down to -USB_AUDIO_ATT_MAX_DB in 1 dB
+// steps.
+#define USB_AUDIO_ATT_MAX_DB  64u
+
+// Master volume set by the host. 0 dB, unmuted at boot and on every
+// enumeration.
+typedef struct {
+    bool    mute;             // output zeros: mute control, or a volume below
+                              // the range
+    uint8_t att_db;           // attenuation, 0 .. USB_AUDIO_ATT_MAX_DB
+} usb_audio_volume_t;
+
 // Counters are cumulative since boot.
 typedef struct {
     uint32_t rx_bytes;        // total payload bytes read via usb_audio_read()
@@ -69,6 +81,10 @@ usb_audio_format_t usb_audio_format(void);
 // (e.g. STOP and START on a direct 16/24-bit switch); read the resulting
 // state from usb_audio_link_state() and usb_audio_format().
 uint32_t usb_audio_take_events(void);
+
+// Changes as the host's Feature Unit requests arrive in tud_task(), so it
+// is stable between two tud_task() calls.
+usb_audio_volume_t usb_audio_volume(void);
 
 void usb_audio_get_stats(usb_audio_stats_t *stats);
 void usb_audio_fifo_max_reset(void);
