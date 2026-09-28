@@ -31,6 +31,9 @@
 // many windows: at the slow stages a main-loop stall in a single reference
 // window would offset the trim by several ppm.
 #define WARM_REF_WINDOWS 8u
+// The lock, calm and stage bands are fractions of this (or of the set point
+// if that is larger): independent of how little the FIFO holds.
+#define BAND_MIN_NS      24000000
 
 static int64_t shr_sym(int64_t x, unsigned n) {
     return x < 0 ? -((-x) >> n) : x >> n;
@@ -54,6 +57,10 @@ void clock_servo_start(clock_servo_t *s, const clock_servo_params_t *p) {
     s->ki_scale = ((int64_t)KI0 * s->window_us * 65536 + 500000) / 1000000;
     s->setpoint_ns = (int64_t)p->setpoint_bytes * 1000000000 /
                      ((int64_t)p->frame_bytes * p->sample_rate);
+    s->band_ns = s->setpoint_ns > BAND_MIN_NS ? s->setpoint_ns : BAND_MIN_NS;
+    // A raw error this large drops a stage at once: at the slow stages the
+    // filtered error lags by seconds, and the FIFO holds only the set point.
+    s->drop_ns = s->setpoint_ns / 4 < s->band_ns / 8 ? s->setpoint_ns / 4 : s->band_ns / 8;
     s->ref_max_ns = (int64_t)REF_MAX_CHUNKS * p->chunk_frames * 1000000000 / p->sample_rate;
     s->trim = (int32_t)clamp64(p->trim_ppb, CLOCK_SERVO_MAX_PPB);
     s->integ = (int64_t)s->trim * 65536;
@@ -82,27 +89,28 @@ static int64_t prop_term(int64_t e_ns, unsigned stage) {
     return shr_sym(KP0 * e_ns, stage);
 }
 
-// e: filtered error against the reference.
-static void run_stage_logic(clock_servo_t *s, int64_t e) {
+// e: filtered error against the reference; raw: this window's unfiltered one.
+static void run_stage_logic(clock_servo_t *s, int64_t e, int64_t raw) {
     int64_t mag = e < 0 ? -e : e;
+    int64_t raw_mag = raw < 0 ? -raw : raw;
     s->stage_us = add_sat(s->stage_us, s->window_us);
     if (s->stage < STAGE_LAST && s->stage_us >= (HOLD0_US << s->stage) &&
-        mag < s->setpoint_ns / 32) {
+        mag < s->band_ns / 32) {
         // Bumpless: the proportional part given up moves into the integral.
         s->integ += (prop_term(e, s->stage) - prop_term(e, s->stage + 1u)) * 65536;
         s->stage++;
         s->stage_us = 0;
-    } else if (s->stage > 0 && mag > s->setpoint_ns / 8 && s->stage_us >= 2u * s->window_us) {
+    } else if (s->stage > 0 && raw_mag > s->drop_ns && s->stage_us >= 2u * s->window_us) {
         s->stage--;
         s->stage_us = 0;
     }
 
-    if (mag < s->setpoint_ns / 32) {
+    if (mag < s->band_ns / 32) {
         s->calm_us = add_sat(s->calm_us, s->window_us);
     } else {
         s->calm_us = 0;
     }
-    if (mag > s->setpoint_ns / 16) {
+    if (mag > s->band_ns / 16) {
         s->locked = false;
     } else if (s->stage > 0 && s->calm_us >= LOCK_CALM_US) {
         s->locked = true;
@@ -135,7 +143,7 @@ static bool close_window(clock_servo_t *s) {
 
     // Unfiltered: the slow stages' low-pass would delay this by seconds.
     if (s->verify_us) {
-        if ((raw < 0 ? -raw : raw) > s->setpoint_ns / 32) {
+        if ((raw < 0 ? -raw : raw) > s->band_ns / 32) {
             // As a fresh start from the current trim, holding the level
             // reached (the next window is the new reference).
             s->verify_us = 0;
@@ -153,7 +161,7 @@ static bool close_window(clock_servo_t *s) {
         s->verify_us = s->verify_us > s->window_us ? s->verify_us - s->window_us : 0;
     }
 
-    run_stage_logic(s, e);
+    run_stage_logic(s, e, raw);
 
     const int64_t lim = CLOCK_SERVO_MAX_PPB;
     // The stage change may have moved the integral out of range.

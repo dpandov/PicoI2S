@@ -238,8 +238,8 @@ static void output_stop(void) {
 }
 
 // FIFO level held by the feedback (UAC2) or the clock servo (UAC1).
-static uint32_t fifo_setpoint(uint32_t depth) {
-    return depth / 2u;
+static uint32_t fifo_setpoint(const usb_audio_format_t *f) {
+    return usb_audio_fifo_setpoint(f->sample_rate, f->subslot_bytes);
 }
 
 // FIFO level that starts playback. The start moves RING_TARGET + DMA_FRAMES
@@ -254,7 +254,7 @@ static uint32_t fifo_setpoint(uint32_t depth) {
 static uint32_t preroll_bytes(const usb_audio_format_t *f, uint32_t depth) {
     uint32_t frame_bytes = 2u * f->subslot_bytes;
     uint32_t moved = RING_TARGET + (adaptive() && spdif_tx_running() ? 0u : DMA_FRAMES);
-    uint32_t want = fifo_setpoint(depth) + moved * frame_bytes;
+    uint32_t want = fifo_setpoint(f) + moved * frame_bytes;
     uint32_t packet = ((f->sample_rate + 999u) / 1000u + 1u) * frame_bytes;
     uint32_t cap = depth - 2u * packet;
     return want < cap ? want : cap;
@@ -292,11 +292,11 @@ static void stream_started(const usb_audio_format_t *f, uint64_t now) {
 // A fresh output starts from the nominal rate (its known clock error
 // removed); a running one resumes the servo, so a restart continues from
 // the locked rate (or from the current trim) without a jump.
-static void servo_start(const usb_audio_format_t *f, uint32_t depth, bool fresh) {
+static void servo_start(const usb_audio_format_t *f, bool fresh) {
     clock_servo_params_t sp = {
         .sample_rate = f->sample_rate,
         .frame_bytes = 2u * f->subslot_bytes,
-        .setpoint_bytes = fifo_setpoint(depth),
+        .setpoint_bytes = fifo_setpoint(f),
         .chunk_frames = SPDIF_TX_BUFFER_FRAMES,
         .trim_ppb = fresh ? -spdif_tx_rate_error_ppb() : spdif_tx_trim_ppb(),
     };
@@ -309,7 +309,7 @@ static void servo_start(const usb_audio_format_t *f, uint32_t depth, bool fresh)
 }
 
 // Pre-roll done: fill the ring and start the output if it is stopped.
-static void begin_playing(const usb_audio_format_t *f, uint32_t depth, uint64_t now) {
+static void begin_playing(const usb_audio_format_t *f, uint64_t now) {
     bool start = !spdif_tx_running();
     // Starts at the requested volume without a ramp: silence precedes it
     // (pre-roll, underrun or stopped output).
@@ -337,7 +337,7 @@ static void begin_playing(const usb_audio_format_t *f, uint32_t depth, uint64_t 
         log_printf("spdif: %lu Hz %u-bit\n", (unsigned long)f->sample_rate, bits);
     }
     if (adaptive()) {
-        servo_start(f, depth, start);
+        servo_start(f, start);
     }
     // After the fill: a flag raised before it is stale.
     ring_short = false;
@@ -410,7 +410,7 @@ void audio_pipeline_task(void) {
         usb_audio_stats_t us;
         usb_audio_get_stats(&us);
         if (us.fifo_level >= preroll_bytes(&f, us.fifo_depth)) {
-            begin_playing(&f, us.fifo_depth, now);
+            begin_playing(&f, now);
         }
     }
 

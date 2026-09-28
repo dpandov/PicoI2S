@@ -140,7 +140,7 @@ generated analysis go in `scratch/` at the repository root. This folder and
      clears it before calling the close callback.
    - One stop rule: output stops 3 s after the last stream sample entered
      the ring. Covers both stream close and stall.
-   - Stream start: pre-roll until the FIFO holds its half-full set point
+   - Stream start: pre-roll until the FIFO holds its set point (step 10)
      plus what the start pulls out (ring target and two DMA buffers), so
      the stream starts with steady-state buffering; then start the output (switching
      the PLL family first if needed). Same rate, other word length: update
@@ -270,6 +270,92 @@ generated analysis go in `scratch/` at the repository root. This folder and
      still buffered (up to about 12 ms), which is harmless. Diagnostic
      token `v<dB>` / `vM` last in both modes; UAC1 counters capped at 9999
      to fit 95 characters.)
+9. I2S output with MCLK, plus a dual-line mode for multibit DACs (AD1865,
+   TDA1541 simultaneous mode, PCM63 / PCM1702 pairs). (planned)
+   - Runs alongside S/PDIF from the same block interrupt: the interrupt
+     that pulls 96 frames from the ring encodes them for S/PDIF and
+     formats them for I2S, and both DMA chains (data + control channel,
+     as in `spdif_tx`) start and stop together. Same clk_sys, same integer
+     dividers (5/10/15 and 9/18), same trim in UAC1 mode (the dither is
+     written to both state machines), so the outputs stay sample-aligned
+     without any cross-checking. Stops with S/PDIF after the 3-s silence
+     (clocks low when idle; DACs that dislike clock loss can get a
+     keep-running option later).
+   - One PIO state machine, one program per family: 10 (48k family) or
+     18 (44.1k family) SM cycles per BCLK bit at the S/PDIF dividers.
+     BCLK = 64 x Fs, LRCK = Fs, MCLK = 128 x Fs from side-set in the same
+     program (2/3, 5/5, 7/8 or 4/5, 9/9 cycle halves: 40..50 % duty).
+     MCLK must come from the same state machine: a clock-generator or PWM
+     MCLK would not follow the UAC1 trim and would drift against BCLK.
+     256 x Fs is not offered: 0 ppm 24.576 MHz cannot be derived from the
+     12 MHz crystal at all, and at 32 / 88.2 / 96 kHz no integer cycle
+     count exists on the accurate clocks. All DACs that need MCLK accept
+     128 x Fs at 88.2 kHz and above.
+   - Formats (selected by three jumper pins, see below): I2S (Philips,
+     data one BCLK after the LRCK edge), left-justified, right-justified
+     16 / 24 (samples pre-shifted in the interrupt), and dual-line: DL and
+     DR on separate pins from one `out pins, 2` (the two channels are
+     bit-interleaved in the interrupt with a byte table), common BCLK,
+     data MSB first right-justified to the DAC's word length (the AD1865
+     keeps the last 18 bits before LATCH; left-justified data would lose
+     the MSBs), LATCH pulse after the LSB in place of LRCK. LATCH
+     polarity, width and active BCLK edge are per-mode constants,
+     verified against the datasheets (AD1865, TDA1541, PCM63) during
+     implementation. Volume applies to both outputs (it is in the ring).
+   - Pins: DATA / DL GP16, DR GP17, BCLK GP18, LRCK / LATCH GP19, MCLK
+     GP20 (physical 21, 22, 24, 25, 26; GND on 23 and 28). Side-set and
+     `out` pins must be consecutive. Format jumpers GP2, GP3, GP4
+     (physical 4, 5, 6, next to GND on 3, forming a row with the UAC pin
+     on 7), internal pull-ups, read once at boot with the mode pin,
+     grounded = 1, GP4 GP3 GP2: 000 I2S (all open, default), 001
+     left-justified, 010 right-justified 24, 011 right-justified 16, 100
+     dual-line 16 (TDA1541), 101 dual-line 18 (AD1865), 110 dual-line 20
+     (PCM63 / PCM1702), 111 dual-line 24. MCLK is driven in every mode.
+   - Self-test build: a capture state machine on the I2S pins (clocked by
+     BCLK, framed by LRCK / LATCH) decodes the output per format; the
+     report and `tools/selftest.py` check it bit-exact and aligned with
+     the S/PDIF decode. Bring-up on a PCM5102 / ES9023 board (I2S with
+     and without MCLK) and an AD1865 or TDA1541 board (dual-line).
+   - Known limitation to document: in UAC1 mode the servo dither is a
+     sawtooth phase error of up to one clk_sys cycle (7..16 ns) on the
+     I2S clocks; asynchronous DACs ignore it, synchronous ones see it as
+     low-level jitter. UAC2 mode has none.
+   - Steps: (1) output layer owning the block interrupt and both DMA
+     chains, S/PDIF unchanged on the line; (2) `src/i2s/` transmitter
+     (programs, MCLK, converters, trim); (3) jumper read and
+     `board_config.h`; (4) self-test capture and tool; (5) bring-up,
+     sweeps, glitch checks, short soak in both modes; README wiring and
+     format table.
+10. Latency: FIFO set point in time, not bytes. (done; lip-sync judged
+    good on Windows with video)
+    - Before: the receive FIFO (9312 bytes, sized for 96 kHz / 24-bit) was
+      held half full, 4656 bytes, which is 6 ms at 96/24 but 24 ms at
+      48/16 and 36 ms at 32/16; worst case through the device up to
+      48 ms. Now `usb_audio_fifo_setpoint()` holds 6 packets of the
+      current format (`FIFO_SETPOINT_PACKETS`): 6 ms everywhere, the
+      margin the 4-h UAC2 soak at 96/24 already ran with. Worst case
+      through the device 10 / 14 / 18 ms at 96 / 48 / 32 kHz (FIFO plus
+      up to 384 frames in the ring and DMA buffers). Pre-roll shrinks
+      with it.
+    - UAC2: the threshold goes to TinyUSB's FIFO_COUNT feedback through
+      `fifo_count.fifo_threshold` in `tud_audio_feedback_params_cb()`,
+      computed from the rate and the alt setting's subslot (the callback
+      runs at SET_INTERFACE, when the rate is known). The proportional
+      gain scales with the threshold (TinyUSB), so the loop is stiffer:
+      time constant about 0.3 s instead of 1 s, still well above the
+      64 ms level filter.
+    - UAC1: the servo holds the same set point; its lock, calm and stage
+      bands stay fractions of 24 ms of audio (`BAND_MIN_NS`, or the set
+      point if larger), not of the set point, so the dynamics verified in
+      the long soak are unchanged. One addition: a stage drop is decided on
+      the raw window error above a quarter of the set point (`drop_ns`),
+      not on the filtered error. At the slow stages the filter lags by
+      seconds, and the host-simulation's 1500 ppm rate step at 32 kHz
+      drained the 6 ms FIFO to empty before the old rule (filtered error
+      above 3 ms) fired; now it keeps a third of the FIFO.
+    - The ring target (192 frames) and the 96-frame DMA buffers stay: they
+      are worth a few ms at most, and the block size is tied to the
+      192-frame channel-status period.
 
 ## Known TinyUSB issues (0.21.0)
 

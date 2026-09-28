@@ -116,6 +116,15 @@ USB host --iso OUT--> TinyUSB FIFO --main loop--> PCM ring --DMA IRQ: BMC encode
   pauses. After 3 seconds without audio the S/PDIF output stops (line held
   idle, no carrier), letting the receiver drop lock, auto-switch inputs or
   go to standby. It restarts when the host streams again.
+- **Buffering and latency**: the USB receive FIFO is held at 6 packets
+  (6 ms) at every format by the feedback (UAC2) or the clock servo (UAC1);
+  it can hold 12 packets of the largest format, so there is room for a host
+  that sends early or late by several milliseconds. Behind it a 192-frame
+  ring and two 96-frame DMA buffers hold 2 to 4 blocks. From a sample's
+  arrival to its bit cells on the line the worst case is about 10 ms at
+  96 kHz, 14 ms at 48 kHz and 18 ms at 32 kHz (16 or 24 bit alike); a
+  stream starts once the FIFO holds that much. The host's own buffering
+  and the receiver's processing come on top.
 
 ## Volume
 
@@ -295,7 +304,7 @@ of it.
 
 - Step 1, bring-up: done.
 - Step 2, UAC2 device: done. Enumerates on Windows 11, all 5 rates x 2 bit
-  depths stream correctly, feedback holds the buffer at half full. Verified
+  depths stream correctly, feedback holds the buffer at its set point. Verified
   on iPad and iPhone.
 - Step 3, S/PDIF output: done on the pin. All 5 rates x 2 bit depths are
   bit-exact on the S/PDIF line (checked by a test build that decodes its own

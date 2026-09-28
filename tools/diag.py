@@ -18,7 +18,7 @@ Output fields:
     a/o/1       UAC2 mode: host detected as Apple (3-byte 10.14 feedback) or
                 other; 1: UAC1 mode (mode pin GP5 grounded, PID 0x0002)
     rate/bits   current stream format
-    ff<N>       receive FIFO level in bytes (depth 9312, held half full)
+    ff<N>       receive FIFO level in bytes (depth 9312, held at 6 packets)
     ur<N>       underruns: output ring ran dry while playing
     run0/1      stream samples going out on S/PDIF
     led0/1      onboard LED state

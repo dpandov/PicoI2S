@@ -92,6 +92,13 @@ void usb_audio_fifo_max_reset(void);
 // Bytes currently in the receive FIFO.
 uint32_t usb_audio_fifo_level(void);
 
+// Receive FIFO level held while streaming, in 1 ms packets of the current
+// format: the same time at every format (the FIFO itself is sized in bytes
+// for 96 kHz / 24-bit, where 6 packets is half of it). It is the latency
+// through the FIFO and the margin against a late or early host.
+#define FIFO_SETPOINT_PACKETS 6u
+uint32_t usb_audio_fifo_setpoint(uint32_t sample_rate, uint8_t subslot_bytes);
+
 // Reads up to max_bytes of interleaved little-endian PCM, whole stereo
 // frames only. Returns the number of bytes read.
 uint32_t usb_audio_read(void *dst, uint32_t max_bytes);

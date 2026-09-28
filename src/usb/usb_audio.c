@@ -632,17 +632,27 @@ bool tud_audio_rx_done_isr(uint8_t rhport, uint16_t n_bytes_received, uint8_t fu
     return true;
 }
 
-// FIFO_COUNT steers the host so the receive FIFO stays half full. UAC2
-// only: the UAC1 descriptors have no feedback endpoint.
+uint32_t usb_audio_fifo_setpoint(uint32_t sample_rate, uint8_t subslot_bytes)
+{
+    uint32_t packet = ((sample_rate + 999u) / 1000u) * AUDIO_N_CHANNELS * subslot_bytes;
+    return FIFO_SETPOINT_PACKETS * packet;
+}
+
+// FIFO_COUNT steers the host so the receive FIFO stays at the set point.
+// UAC2 only: the UAC1 descriptors have no feedback endpoint. Read at
+// SET_INTERFACE, when the rate is already known (UAC2 hosts set it with
+// the stream closed).
 void tud_audio_feedback_params_cb(uint8_t func_id, uint8_t alt_itf, audio_feedback_params_t *feedback_param)
 {
     (void) func_id;
-    (void) alt_itf;
+    uint8_t subslot = (alt_itf == AS_ALT_24BIT) ? AUDIO_24BIT_SUBSLOT : AUDIO_16BIT_SUBSLOT;
 
     diag_mark(DIAG_MARK_FB_PARAMS);
     memset(feedback_param, 0, sizeof(*feedback_param));
     feedback_param->method      = AUDIO_FEEDBACK_METHOD_FIFO_COUNT;
     feedback_param->sample_freq = s.sample_rate;
+    feedback_param->fifo_count.fifo_threshold =
+        (uint16_t) usb_audio_fifo_setpoint(s.sample_rate, subslot);
 }
 
 //--------------------------------------------------------------------+

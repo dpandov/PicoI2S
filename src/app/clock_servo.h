@@ -9,11 +9,12 @@
 // starts fast (natural frequency 2 rad/s, critically damped) to catch the
 // host rate within a second or two, then halves its bandwidth stage by stage
 // down to 0.0625 rad/s (0.01 Hz), so that after settling the trim only
-// wanders slowly. A large error drops back to a faster stage. The trim moves
-// by at most 50 ppm per window. A resume on a still running output continues
-// from the last locked rate estimate and stage; a level error beyond 1/32 of
-// the set point in its first 10 s (the host rate changed) restarts the
-// acquisition.
+// wanders slowly. A large raw error drops back to a faster stage. The trim
+// moves by at most 50 ppm per window. A resume on a still running output
+// continues from the last locked rate estimate and stage; a level error
+// beyond 1/32 of the band in its first 10 s (the host rate changed) restarts
+// the acquisition. The bands are fractions of 24 ms of audio (or of the set
+// point, if larger), so they do not shrink with a small set point.
 #pragma once
 
 #include <stdbool.h>
@@ -38,6 +39,8 @@ typedef struct {
     uint32_t window_us;
     int64_t  ki_scale;          // stage-0 integral gain x window, Q16
     int64_t  setpoint_ns;
+    int64_t  band_ns;           // scale of the lock and stage bands
+    int64_t  drop_ns;           // raw error that drops a stage
     int64_t  ref_max_ns;
     // Level averaging.
     bool     primed;
