@@ -123,3 +123,23 @@ void monitor_task(uint32_t events) {
     update_diag_status();
     log_stats();
 }
+
+const char *monitor_session_string(void) {
+    static char buf[64];
+    audio_pipeline_session_t s;
+    audio_pipeline_get_session(&s);
+    int n = snprintf(buf, sizeof(buf), "n%lu fr%lu sig", (unsigned long)s.streams,
+                     (unsigned long)s.frames);
+    if (n > 0 && (size_t)n < sizeof(buf)) {
+        if (s.signal_age_ms == UINT32_MAX) {
+            n += snprintf(buf + n, sizeof(buf) - (size_t)n, "-");
+        } else {
+            n += snprintf(buf + n, sizeof(buf) - (size_t)n, "%lu", (unsigned long)s.signal_age_ms);
+        }
+    }
+    if (n > 0 && (size_t)n < sizeof(buf)) {
+        snprintf(buf + n, sizeof(buf) - (size_t)n, " up%lu",
+                 (unsigned long)(time_us_64() / 1000u));
+    }
+    return buf;
+}

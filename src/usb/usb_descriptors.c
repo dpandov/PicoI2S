@@ -19,6 +19,7 @@
 
 #include "usb/usb_audio.h"
 #include "usb/usb_descriptors.h"
+#include "app/monitor.h"
 #include "diag/diag.h"
 #if USB2SPDIF_SELFTEST
 #include "selftest/selftest.h"
@@ -492,6 +493,9 @@ uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid)
 
     if (index == STRID_DIAG) {
         return hidden_string_desc(diag_string());
+    }
+    if (index == STRID_SESSION) {
+        return hidden_string_desc(monitor_session_string());
     }
 #if USB2SPDIF_SELFTEST
     if (index == STRID_SELFTEST) {

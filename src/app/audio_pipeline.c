@@ -50,6 +50,10 @@ typedef struct {
     bool     first_play;      // not played yet since the stream started
     bool     loop_reset;      // reset the loop maximum next iteration
     uint64_t last_audio_us;   // stream samples last moved into the ring
+    uint64_t last_signal_us;  // a non-zero sample last moved into the ring
+    bool     had_signal;
+    uint32_t streams;
+    uint32_t frames;
     uint8_t  att;             // attenuation applied to the ring, 0 .. ATT_SILENT
     uint32_t start_failures;
     uint32_t overruns_base;   // counts when the stream started
@@ -175,10 +179,20 @@ static void sync_word_bits(void) {
     }
 }
 
+// True if any of the n frames at ring index wr is non-zero.
+static bool chunk_has_signal(uint32_t wr, uint32_t n) {
+    int32_t acc = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t k = ((wr + i) & RING_MASK) * 2u;
+        acc |= ring[k] | ring[k + 1u];
+    }
+    return acc != 0;
+}
+
 // Moves stream frames into the ring, up to RING_TARGET. Returns the count.
 // Each read is a chunk of up to READ_FRAMES with one ramp step. At 0 dB the
 // samples are copied unchanged (bit-perfect).
-static uint32_t pump(const usb_audio_format_t *f) {
+static uint32_t pump(const usb_audio_format_t *f, uint64_t now) {
     uint32_t frame_bytes = 2u * f->subslot_bytes;
     uint32_t moved = 0;
     uint8_t target = att_target(usb_audio_volume());
@@ -214,6 +228,11 @@ static uint32_t pump(const usb_audio_format_t *f) {
         if (p.att != 0) {
             apply_volume(wr, n, p.att);
         }
+        // What goes out on the line: a muted stream is digital silence.
+        if (chunk_has_signal(wr, n)) {
+            p.last_signal_us = now;
+            p.had_signal = true;
+        }
         // Before the chunk is published, so 24 bits are flagged by the time
         // the first attenuated samples go out.
         sync_word_bits();
@@ -221,11 +240,12 @@ static uint32_t pump(const usb_audio_format_t *f) {
         ring_wr = wr + n;
         moved += n;
     }
+    p.frames += moved;
     return moved;
 }
 
 static void top_up(const usb_audio_format_t *f, uint64_t now) {
-    if (pump(f) > 0) {
+    if (pump(f, now) > 0) {
         p.last_audio_us = now;
     }
 }
@@ -279,6 +299,7 @@ static void stream_started(const usb_audio_format_t *f, uint64_t now) {
     p.bits = f->resolution;
     p.playing = false;
     p.hold = false;
+    p.streams++;
     stats_reset();
     // An opening stream counts as audio, so a running output is not stopped
     // during its pre-roll.
@@ -450,4 +471,14 @@ void audio_pipeline_get_stats(audio_pipeline_stats_t *stats) {
     stats->loop_max_us = diag_loop_max_us();
     stats->trim_ppb = spdif_tx_trim_ppb();
     stats->clock_locked = p.playing && adaptive() && clock_servo_locked(&servo);
+}
+
+void audio_pipeline_get_session(audio_pipeline_session_t *session) {
+    session->streams = p.streams;
+    session->frames = p.frames;
+    session->signal_age_ms = UINT32_MAX;
+    if (p.had_signal) {
+        uint64_t age = (time_us_64() - p.last_signal_us) / 1000u;
+        session->signal_age_ms = age < UINT32_MAX ? (uint32_t)age : UINT32_MAX;
+    }
 }

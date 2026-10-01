@@ -45,7 +45,13 @@ Output fields:
 
     e.g. UAC2:  So 48000/24 ff4712 ur0 run1 led1 tx48000 ov0 lt0 rmin144 fmax5240 lp212 v0
          UAC1:  S1 44100/16 ff4935 ur0 run1 led1 tx44100 ov0 lt0 rmin144 fmax5400 lp212 tr361L v12
+
+A second hidden string (index 0x23, read by tools/monitor.py) carries the
+session counters since boot: "n<streams> fr<frames> sig<ms|-> up<ms>":
+stream starts, frames moved to the output (wraps at 2^32), milliseconds
+since the last non-zero sample went out (- if none yet), uptime.
 """
+import re
 import sys
 import time
 
@@ -56,7 +62,10 @@ import usb.util
 VID = 0x1209
 PIDS = {0x0001: "UAC2", 0x0002: "UAC1"}
 STRID_DIAG = 0x20
+STRID_SESSION = 0x23
 LANGID_EN_US = 0x0409
+
+_INT_TOKEN = re.compile(r"^([a-z]+)(\d+)$")
 
 
 def read_diag(backend, index=STRID_DIAG):
@@ -70,6 +79,54 @@ def read_diag(backend, index=STRID_DIAG):
         return f"<error: {e}>"
     finally:
         usb.util.dispose_resources(dev)
+
+
+def parse_status(s):
+    """Diagnostic string -> dict, or None if it is not one.
+
+    Keys: boots, prev, link ('D', 'I', 'S'), host ('a', 'o', '1'), uac1,
+    rate, bits, volume (dB or 'M'), trim / locked (UAC1), fields (the
+    integer tokens: ff, ur, run, led, tx, ov, lt, rmin, fmax, lp).
+    """
+    head, sep, app = s.partition(" | ")
+    m = re.match(r"^b(\d+) (\S+)", head)
+    if not m or not sep:
+        return None
+    d = {"raw": s, "boots": int(m.group(1)), "prev": m.group(2), "fields": {},
+         "link": None, "host": None, "uac1": False, "rate": None, "bits": None,
+         "volume": None, "trim": None, "locked": None}
+    tokens = app.split()
+    if tokens and re.fullmatch(r"[DIS][ao1]", tokens[0]):
+        d["link"], d["host"] = tokens[0][0], tokens[0][1]
+        d["uac1"] = d["host"] == "1"
+        tokens = tokens[1:]
+    for tok in tokens:
+        m = re.fullmatch(r"tr(-?\d+)([LU])", tok)
+        if m:
+            d["trim"], d["locked"] = int(m.group(1)), m.group(2) == "L"
+            continue
+        m = re.fullmatch(r"v(\d+|M)", tok)
+        if m:
+            d["volume"] = "M" if m.group(1) == "M" else int(m.group(1))
+            continue
+        m = re.fullmatch(r"(\d+)/(\d+)", tok)
+        if m:
+            d["rate"], d["bits"] = int(m.group(1)), int(m.group(2))
+            continue
+        m = _INT_TOKEN.match(tok)
+        if m:
+            d["fields"][m.group(1)] = int(m.group(2))
+    return d
+
+
+def parse_session(s):
+    """Session string -> dict (streams, frames, signal_age_ms or None, up_ms)."""
+    m = re.fullmatch(r"n(\d+) fr(\d+) sig(\d+|-) up(\d+)", s.strip())
+    if not m:
+        return None
+    return {"streams": int(m.group(1)), "frames": int(m.group(2)),
+            "signal_age_ms": None if m.group(3) == "-" else int(m.group(3)),
+            "up_ms": int(m.group(4))}
 
 
 def main():

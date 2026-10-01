@@ -2,9 +2,10 @@
 //
 // The main loop moves PCM from the USB receive FIFO into a ring of 32-bit
 // left-justified stereo frames; the S/PDIF DMA interrupt drains the ring at
-// the transmitter's rate. The receive FIFO is held half full: in UAC2 mode
-// by the USB feedback, in UAC1 mode (adaptive) by trimming the transmitter
-// rate to the host's (app/clock_servo.h).
+// the transmitter's rate. The receive FIFO is held at its set point
+// (usb_audio_fifo_setpoint()): in UAC2 mode by the USB feedback, in UAC1
+// mode (adaptive) by trimming the transmitter rate to the host's
+// (app/clock_servo.h).
 //
 // The output starts when a stream has pre-filled, and stops (pin idle) after
 // 3 s without audio samples: stream closed, or open with nothing arriving.
@@ -37,6 +38,15 @@ typedef struct {
     bool     clock_locked;    // UAC1: playing and the clock servo locked
 } audio_pipeline_stats_t;
 
+// Session information for the host monitor (tools/monitor.py), all since boot.
+typedef struct {
+    uint32_t streams;         // stream starts (open, or format change while open)
+    uint32_t frames;          // frames moved into the ring (wraps)
+    uint32_t signal_age_ms;   // time since the last non-zero sample went into
+                              // the ring (after the volume), UINT32_MAX if none
+                              // yet: digital silence when large
+} audio_pipeline_session_t;
+
 // Call after spdif_tx_init().
 void audio_pipeline_init(void);
 
@@ -48,3 +58,4 @@ void audio_pipeline_task(void);
 bool audio_pipeline_playing(void);
 
 void audio_pipeline_get_stats(audio_pipeline_stats_t *stats);
+void audio_pipeline_get_session(audio_pipeline_session_t *session);

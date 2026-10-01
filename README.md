@@ -262,6 +262,55 @@ Host tools in `tools/` (`pip install -r tools/requirements.txt`):
 - `tools/diag.py` reads the diagnostic string: previous-boot crash record
   (panic, fault or hang location) and live stream status. This works without
   a debug probe or UART.
+- `tools/monitor.py` logs sessions, formats, digital silence and the other
+  events of a running bridge; see Monitoring below.
+
+## Monitoring
+
+`tools/monitor.py` watches a running bridge from the host (any OS with
+libusb; it reads the hidden USB strings, no audio driver involved) and
+prints one timestamped line per event:
+
+```
+16:54:45 device connected: UAC2, non-Apple host, boot 3
+16:54:52 stream opened: 48000 Hz / 24-bit (2.304 Mbit/s)
+16:54:52 playing
+16:54:52 S/PDIF output on: 48000 Hz
+16:54:52 digital silence since the stream opened
+16:54:58 signal after 5.8 s of silence
+16:55:04 digital silence
+16:55:10 stream closed after 17.9 s
+16:55:13 S/PDIF output off after 20.9 s (3 s without audio)
+```
+
+Events: device connected / disconnected / rebooted (with the crash record
+of the previous boot), stream opened / restarted / closed with the format
+and the PCM data rate, playing / stalled / underrun, S/PDIF output on and
+off, digital silence (all-zero samples, after the volume, for `--silence`
+seconds, default 0.5) and the return of signal, volume changes, clock lock
+in UAC1 mode, overrun and late-interrupt counts. `--status N` adds a line
+every N seconds while a stream is open with the sample rate measured from
+the device's frame counter against the PC clock (over 30 s, to about
+100 ppm: the USB read timing limits it), FIFO level, ring minimum,
+main-loop time and trim; `--log FILE` appends everything to a file.
+
+```
+python -m pip install pyusb libusb-package
+python tools/monitor.py                        # events only, until Ctrl+C
+python tools/monitor.py --status 10 --log session.log
+```
+
+Options: `--interval S` poll period (default 0.25 s), `--silence S` seconds
+of all-zero samples that count as digital silence (default 0.5), `--status S`
+status line period, `--log FILE`. Ctrl+C prints a summary (stream starts,
+time streaming). Only `pyusb` and `libusb-package` are needed; `python -m pip`
+avoids a stray `pip` launcher that belongs to another Python installation.
+Events shorter than the poll interval (a stream opened and closed within
+0.25 s) are not seen.
+
+The firmware serves the counters behind this as a second hidden USB string
+(index 0x23: stream starts, frames sent, time since the last non-zero
+sample, uptime); `tools/diag.py` documents both strings.
 
 ## Self-test
 

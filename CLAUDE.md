@@ -356,6 +356,19 @@ generated analysis go in `scratch/` at the repository root. This folder and
     - The ring target (192 frames) and the 96-frame DMA buffers stay: they
       are worth a few ms at most, and the block size is tied to the
       192-frame channel-status period.
+11. Host monitor: `tools/monitor.py` (done, verified on Windows with a
+    silence / tone / silence sequence). Polls the diagnostic string and a
+    new hidden session string (`STRID_SESSION` 0x23, `app/monitor.c`:
+    "n<streams> fr<frames> sig<ms|-> up<ms>", from
+    `audio_pipeline_get_session()`) and prints sessions, format and data
+    rate, playing / stalled / underrun, output on / off, digital silence
+    and signal, volume, lock and counter events, plus an optional status
+    line with the sample rate measured from the frame counter. Digital
+    silence is detected in `pump()` after the volume (a muted stream is
+    silence on the line) as the age of the last non-zero sample; the
+    threshold is the tool's (`--silence`, default 0.5 s), not the
+    firmware's. The status line had no room (95 characters), hence the
+    second string.
 
 ## Known TinyUSB issues (0.21.0)
 
