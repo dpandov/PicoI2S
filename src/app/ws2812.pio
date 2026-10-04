@@ -1,0 +1,17 @@
+; WS2812 driver for the status LED: 24 bits per frame, MSB first, 10 state-machine
+; cycles per bit at 8 MHz (1.25 us): a 1 is high for 7, a 0 for 2. Configure:
+; side-set on the LED pin, OUT shift left with autopull at 24 bits, joined TX
+; FIFO. Idle (FIFO empty) the line is low, which is the WS2812 reset state.
+
+.program ws2812
+.side_set 1
+
+.wrap_target
+bitloop:
+    out x, 1        side 0 [2]
+    jmp !x do_zero  side 1 [1]
+do_one:
+    jmp bitloop     side 1 [4]
+do_zero:
+    nop             side 0 [4]
+.wrap

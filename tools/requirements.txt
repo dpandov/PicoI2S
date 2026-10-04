@@ -1,0 +1,5 @@
+pyusb
+libusb-package
+sounddevice
+numpy
+ziglang

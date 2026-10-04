@@ -1,0 +1,30 @@
+// clk_sys per sample-rate family, chosen so that the S/PDIF PIO divider
+// (clk_sys / (128 x Fs)) is an integer for every rate in the family.
+#pragma once
+
+#include <stdint.h>
+
+typedef enum {
+    AUDIO_FAMILY_48K,     // 32, 48, 96 kHz
+    AUDIO_FAMILY_44K1,    // 44.1, 88.2 kHz
+} audio_family_t;
+
+typedef enum {
+    AUDIO_CLOCK_ACCURATE,   // lowest PLL error: the Pico is the clock master (UAC2)
+    AUDIO_CLOCK_FAST,       // highest clk_sys: the clock servo cancels the error (UAC1)
+} audio_clock_profile_t;
+
+// Selects the PLL table. Call once, before the first audio_clock_set_family().
+void audio_clock_init(audio_clock_profile_t profile);
+
+audio_family_t audio_clock_family(uint32_t sample_rate);
+
+// Switches clk_sys; clk_peri stays on the 48 MHz USB PLL. Stop the S/PDIF
+// output first. Anything derived from clk_sys (SysTick) must be restarted.
+void audio_clock_set_family(audio_family_t family);
+
+audio_family_t audio_clock_current_family(void);
+
+// Incremented before and after every switch: odd while clk_sys is changing.
+// For observers on the other core.
+uint32_t audio_clock_generation(void);

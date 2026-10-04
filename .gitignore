@@ -1,0 +1,43 @@
+# Scratch and temporary work - never committed
+scratch/
+temp/
+tmp/
+
+# Build output
+build/
+build-*/
+out/
+*.uf2
+*.elf
+*.bin
+*.hex
+*.map
+*.dis
+
+# CMake / Ninja
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+compile_commands.json
+.ninja_deps
+.ninja_log
+
+# IDE / editor
+# Generated per machine by the Raspberry Pi Pico extension ("Import Project");
+# only the extension recommendation is shared.
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.swp
+*~
+
+# OS
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Python helpers
+__pycache__/
+*.pyc
+.venv/
