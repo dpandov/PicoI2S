@@ -1,6 +1,7 @@
 # usb2spdif
 
-USB to S/PDIF (Toslink) bridge firmware for the Raspberry Pi Pico 2 (RP2350).
+USB to S/PDIF (Toslink) bridge firmware for the RP2350: the Waveshare
+RP2350-One (default board) or the Raspberry Pi Pico 2.
 
 The Pico enumerates as a USB Audio Class 2.0 device in asynchronous mode and
 transmits the received PCM stream as S/PDIF through a Toslink optical
@@ -17,7 +18,8 @@ a USB Audio Class 1.0 mode (see [UAC1 mode](#uac1-mode)).
 
 ## Hardware
 
-Minimum build: a Pico 2 and a Toslink transmitter. The reference part is the
+Minimum build: a Waveshare RP2350-One (or a Raspberry Pi Pico 2, see
+below) and a Toslink transmitter. The reference part is the
 Cliff FCR684205T (OTJ-5 optical transmitter jack), a 3-pin through-hole
 module on 2.54 mm pitch that fits a breadboard. Other TTL-input Toslink
 transmitters (TOTX1350, PLT133 and similar) work the same way. Note that
@@ -27,40 +29,52 @@ FCR684205T key figures from the datasheet: Vcc 2.7 to 5.5 V, VIH 2.0 V min,
 16 Mbps max NRZ, 5 mA typical. Our highest cell rate is 12.288 MHz at
 96 kHz, inside the rated speed.
 
-| FCR684205T pin | Function | Pico 2 pin |
+| FCR684205T pin | Function | RP2350-One pin |
 |---|---|---|
-| 1 | GND | GND (pin 33) |
-| 2 | Vcc | 3V3 OUT (pin 36) |
-| 3 | Vin | GPIO 28 (pin 34), `SPDIF_PIN` in source |
+| 1 | GND | GND |
+| 2 | Vcc | 3V3 |
+| 3 | Vin | GP12, `SPDIF_PIN` in source |
 
 Run the module from 3V3, not VBUS. Its input is rated to Vcc + 0.5 V and the
-Pico drives 3.3 V logic, so a 3.3 V supply keeps everything in one domain.
+board drives 3.3 V logic, so a 3.3 V supply keeps everything in one domain.
 Fit a 0.1 uF capacitor between Vcc and GND within 7 mm of the module leads,
 as the datasheet requires. The module is ESD sensitive.
 
-GPIO 28 was chosen because pins 33, 34 and 36 sit together at the top of
-the board, keeping the three wires to the module short.
+GP12 is the last pin of the GP0..GP13 row, on the short side of the board;
+GND and 3V3 are the second and third pin of the other row.
 
 Pin 1 is the pin nearest the mounting peg side when the jack opening faces
 you; check the datasheet drawing in case of doubt.
 
 ### Mode jumper
 
-GPIO 5 (pin 7) selects the USB audio class. It is read once at power-up
-with the internal pull-up enabled; changing it later has no effect until
-the next power-up or reset.
+GP5 selects the USB audio class. It is read once at power-up with the
+internal pull-up enabled; changing it later has no effect until the next
+power-up or reset.
 
-| GP5 (pin 7) | Mode |
+| GP5 | Mode |
 |---|---|
 | Open | UAC2 (default) |
-| Jumper to GND (pin 8) | UAC1 |
+| Jumper to GND | UAC1 |
 
-Pins 7 and 8 are next to each other, so a single 2.54 mm jumper (or a
-switch) between them does it.
+On the RP2350-One GP5 is the sixth pin of the GP0..GP13 row; GND is at the
+top of the other row. On the Pico 2 (pin 7) GND is next to it on pin 8, so
+a single 2.54 mm jumper (or a switch) between them does it.
+
+### Raspberry Pi Pico 2
+
+The firmware also builds for the Raspberry Pi Pico 2 with
+`-DUSB2SPDIF_BOARD=pico2` (same RP2350A, 4 MB flash and 12 MHz crystal;
+`PICO_BOARD` stays `pico2` for both boards). There S/PDIF is on GPIO 28
+(pin 34), chosen because GND (pin 33) and 3V3 OUT (pin 36) sit next to it
+at the top of the board, the mode jumper GP5 (pin 7) has GND next to it on
+pin 8, and the status LED is the onboard LED on GPIO 25.
 
 ### Status LED
 
-The onboard LED (GPIO 25) shows whether audio is playing:
+The status LED (the RP2350-One's WS2812 RGB LED on GP16, lit dim red,
+colour and brightness in `src/board_config.h`; the Pico 2's onboard LED on
+GPIO 25) shows whether audio is playing:
 
 | LED | Meaning |
 |---|---|
@@ -225,13 +239,16 @@ cmake -S . -B build -G Ninja -DPICO_BOARD=pico2
 cmake --build build
 ```
 
+This builds for the RP2350-One; for the Pico 2 add `-DUSB2SPDIF_BOARD=pico2`
+(the pin assignment; `PICO_BOARD` stays `pico2`, it is the same chip).
+
 To check the wiring and a receiver without a USB host, build with
 `-DUSB2SPDIF_TEST_TONE=ON`: the output then carries a 1 kHz tone at -18 dBFS
 (48 kHz / 24-bit) from power-up.
 
 ## Flashing
 
-First time: hold BOOTSEL while plugging in the Pico 2, then copy
+First time: hold BOOT while plugging in the board, then copy
 `build/usb2spdif.uf2` to the drive, or run `picotool load -x build/usb2spdif.uf2`.
 
 After that the firmware exposes the picotool reset interface, so it can be

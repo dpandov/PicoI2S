@@ -4,7 +4,8 @@ Guidance for Claude Code when working in this repository.
 
 ## Project
 
-USB to S/PDIF (Toslink) bridge firmware for the Raspberry Pi Pico 2 (RP2350).
+USB to S/PDIF (Toslink) bridge firmware for the RP2350: the Waveshare
+RP2350-One (default board) or the Raspberry Pi Pico 2.
 Full design and hardware notes are in `README.md`; read it first. Key points:
 
 - USB Audio Class 2.0, asynchronous mode with feedback endpoint. The Pico is
@@ -25,13 +26,15 @@ Full design and hardware notes are in `README.md`; read it first. Key points:
   3 seconds, then stop the S/PDIF output entirely (line idle, no carrier).
   Restart on the next stream. "Audio" = stream open with samples arriving;
   digital silence inside an open stream is still audio.
-- LED (GPIO 25): on while audio is playing, off otherwise, plus two short
-  flashes on enumeration (two). No other blink patterns.
-- Pins: S/PDIF data on GPIO 28 (`SPDIF_PIN`), chosen for proximity to 3V3
-  and GND. The onboard LED (GPIO 25) is reserved as the audio/LOCK
-  indicator; do not use it for anything else. UART0 on GPIO 0/1 is the console.
-  GPIO 5 (`UAC_MODE_PIN`, pin 7 next to GND on pin 8) selects UAC1 when
-  grounded at boot.
+- LED (RP2350-One: the WS2812 on GP16, dim red, driven by a PIO state
+  machine in `app/status_led.c`; Pico 2: GPIO 25): on while audio is
+  playing, off otherwise, plus two short flashes on enumeration (two). No
+  other blink patterns.
+- Pins: S/PDIF data on GP12 (`SPDIF_PIN`; Pico 2: GPIO 28, next to 3V3
+  and GND). The status LED is reserved as the audio/LOCK indicator; do not
+  use it for anything else. UART0 on GPIO 0/1 is the console. GPIO 5
+  (`UAC_MODE_PIN`, pin 7 on both boards, next to GND on pin 8 on the Pico 2)
+  selects UAC1 when grounded at boot.
 
 ## Toolchain
 
@@ -41,7 +44,9 @@ Full design and hardware notes are in `README.md`; read it first. Key points:
   tag and passed to the SDK as `PICO_TINYUSB_PATH` (top of
   `CMakeLists.txt`); the SDK's bundled copy (0.18) is not used. After
   cloning: `git submodule update --init`.
-- Board: `PICO_BOARD=pico2`. ARM cores (not RISC-V). Language: C.
+- Board: `PICO_BOARD=pico2` for both boards (same chip). The wiring is
+  `USB2SPDIF_BOARD` (`rp2350-one`, default, or `pico2`; pins in
+  `src/board_config.h`). ARM cores (not RISC-V). Language: C.
 - Build: `cmake -S . -B build -G Ninja -DPICO_BOARD=pico2 && cmake --build build`
   (`build/` is the directory the VS Code extension uses; Claude's own
   verification builds go in `scratch/`).

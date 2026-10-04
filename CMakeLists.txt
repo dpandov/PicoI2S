@@ -56,6 +56,20 @@ pico_generate_pio_header(usb2spdif ${CMAKE_CURRENT_LIST_DIR}/src/spdif/spdif_tx.
 # TinyUSB includes tusb_config.h by bare name, hence src/usb.
 target_include_directories(usb2spdif PRIVATE src src/usb)
 
+# Board wiring (src/board_config.h): the Waveshare RP2350-One by default, or
+# the Raspberry Pi Pico 2. Both carry the RP2350A with 4 MB of flash and a
+# 12 MHz crystal, so PICO_BOARD stays pico2 for both.
+set(USB2SPDIF_BOARD "rp2350-one" CACHE STRING "Board wiring: rp2350-one or pico2")
+set_property(CACHE USB2SPDIF_BOARD PROPERTY STRINGS rp2350-one pico2)
+if(USB2SPDIF_BOARD STREQUAL "rp2350-one")
+    target_compile_definitions(usb2spdif PRIVATE USB2SPDIF_BOARD_RP2350_ONE=1)
+    pico_generate_pio_header(usb2spdif ${CMAKE_CURRENT_LIST_DIR}/src/app/ws2812.pio)
+elseif(USB2SPDIF_BOARD STREQUAL "pico2")
+    target_compile_definitions(usb2spdif PRIVATE USB2SPDIF_BOARD_PICO2=1)
+else()
+    message(FATAL_ERROR "USB2SPDIF_BOARD must be rp2350-one or pico2")
+endif()
+
 # Outputs a 1 kHz, -18 dBFS test tone at 48 kHz from boot, without a host,
 # to check the wiring and receiver lock.
 option(USB2SPDIF_TEST_TONE "Output a 1 kHz test tone on S/PDIF" OFF)

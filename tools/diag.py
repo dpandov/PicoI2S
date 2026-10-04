@@ -68,17 +68,27 @@ LANGID_EN_US = 0x0409
 _INT_TOKEN = re.compile(r"^([a-z]+)(\d+)$")
 
 
+# Two tools polling at once (monitor.py beside selftest.py) collide on the
+# WinUSB handle: access denied or busy. Those are retried briefly.
+_RETRY_ERRNOS = (13, 16)
+_RETRIES = 5
+_RETRY_DELAY_S = 0.02
+
+
 def read_diag(backend, index=STRID_DIAG):
-    dev = usb.core.find(idVendor=VID, backend=backend,
-                        custom_match=lambda d: d.idProduct in PIDS)
-    if dev is None:
-        return "<device not found>"
-    try:
-        return usb.util.get_string(dev, index, LANGID_EN_US)
-    except usb.core.USBError as e:
-        return f"<error: {e}>"
-    finally:
-        usb.util.dispose_resources(dev)
+    for attempt in range(_RETRIES):
+        dev = usb.core.find(idVendor=VID, backend=backend,
+                            custom_match=lambda d: d.idProduct in PIDS)
+        if dev is None:
+            return "<device not found>"
+        try:
+            return usb.util.get_string(dev, index, LANGID_EN_US)
+        except usb.core.USBError as e:
+            if e.errno not in _RETRY_ERRNOS or attempt == _RETRIES - 1:
+                return f"<error: {e}>"
+            time.sleep(_RETRY_DELAY_S)
+        finally:
+            usb.util.dispose_resources(dev)
 
 
 def parse_status(s):
