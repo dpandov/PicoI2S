@@ -1,17 +1,20 @@
-"""usb2spdif self-test: bit-exact check of the S/PDIF output (Windows).
+"""usb2spdif self-test: bit-exact check of the S/PDIF and I2S outputs (Windows).
 
 Needs firmware built with -DUSB2SPDIF_SELFTEST=ON. The Pico then decodes
-its own S/PDIF pin on core 1 and reports the result as USB string 0x21; no
-receiver, probe or UART is needed. This script plays a test pattern with a
-native WASAPI exclusive-mode player (tools/wasapi_play.c, built on first use
-with the ziglang package into tools/build/) and reads the reports.
+its own S/PDIF pin and its I2S / dual-line pins on core 1 and reports the
+results as USB strings 0x21 and 0x22; no receiver, probe or UART is needed.
+This script plays a test pattern with a native WASAPI exclusive-mode player
+(tools/wasapi_play.c, built on first use with the ziglang package into
+tools/build/) and reads the reports.
 
     pip install -r tools/requirements.txt
     python tools/selftest.py                     sweep: 5 rates x 16/24 bit, 3-s stop
     python tools/selftest.py --only 44100/16     one format
     python tools/selftest.py --soak 60 --rate 96000 --bits 24
                                                  one format for 60 minutes
-    python tools/selftest.py --status            print both reports once
+    python tools/selftest.py --status            print the three reports once
+    python tools/selftest.py --i2s-format dual20 require this I2S format (jumpers)
+    python tools/selftest.py --i2s-filter slow   require this dual-line filter (jumpers)
 
 Sweep order: 48k/16, 48k/24, 44.1k/24, 96k/16, 88.2k/16, 88.2k/24, 32k/24,
 32k/16, 44.1k/16, 96k/24: 16 <-> 24 bit at the same rate and clock family
@@ -32,6 +35,27 @@ underrun / overrun / late-interrupt counters (ur, ov, lt) did not increase.
 After the sweep the output must send silence 2 s after the stream closed and
 be stopped (line idle low) 4.5 s after.
 
+The I2S / dual-line output runs in lockstep with the S/PDIF one in the
+format selected by the format jumpers and, for the dual-line formats, with
+the filter selected by the filter jumpers; the device reports both by
+name. Every row of the sweep gets an I2S result too: PASS when every read
+shows the I2S window "ok" at the requested stream format (frames, no
+silent frames, no sample errors, no framing errors) in the expected format
+(--i2s-format, default: the format the device reports at the start) with
+the expected filter (--i2s-filter, default: the filter the device reports
+at the start) at its oversampling for the rate (sharp, slow, minphase: 8
+below 50 kHz, 4 above), and no bad, gap or skipped windows and no late
+filter blocks (L) were added. The direct formats (i2s, lj, rj24, rj16) and
+the dual-line formats with the nos filter are checked against the pattern
+(a format narrower than the stream, rj16 or dual16 .. dual20 at 24 bit, at
+its own width); the filtered dual-line formats (sharp, slow, minphase, and
+sinc at the sample rate) are checked bit-exact against the window's own
+S/PDIF samples run through the transmitter's filter on the device, so no
+host-side model is involved. The sweep prints the filter token (sharp8,
+slow4, sinc, nos, - ...) in the I2S column. The stop test expects the I2S
+output silent, then stopped with all pins low. The soak logs every I2S
+failure and counter increase as an event.
+
 The device has a volume control that Windows applies even in exclusive
 mode, so the script first sets the Windows volume of the device to 100 %
 and unmutes it (wasapi_play --set-volume-max; a failure is only a warning),
@@ -45,7 +69,10 @@ reads is still caught.
 
 With a test-tone build (-DUSB2SPDIF_TEST_TONE=ON as well) the output is not
 the pattern (report shows "s-"): the script then checks framing, channel
-status and rate of the tone only.
+status and rate of the tone only, plus the I2S framing; a filtered
+dual-line output still gets its bit-exact check against the window's
+S/PDIF samples run through the filter (its "s" stays numeric and must be
+0).
 
 Self-test report (see src/selftest/selftest_report.h):
 
@@ -62,6 +89,28 @@ Self-test report (see src/selftest/selftest_report.h):
     B G K   cumulative windows: bad, with gaps (dropouts), skipped
             (format or clock change during the capture)
     e.g.    #812 ok tx48000/24 f577 z0 e0 p0 o0 v0 s0 c1020B fs47991 B2 G0 K1
+
+I2S report (same header, USB string 0x22, same seq as the S/PDIF window):
+
+    #<seq> <state> <fmt> <flt> tx<rate>/<bits> f<frames> z<silent> s<errors|->
+        e<framing> L<late> B<bad> G<gaps> K<skipped>
+        [@<frame>:<prev or expected L>><L>/<R>]
+
+    fmt     jumper format: i2s, lj, rj24, rj16, dual16, dual18, dual20, dual24
+    flt     dual-line filter (jumpers): sharp, slow or minphase with the
+            oversampling of the running output appended (sharp8, slow4, ...;
+            the bare name while stopped), sinc, nos; - for the direct formats
+    state   ok, sil, idle (stopped, pins low), wait; failures in capitals:
+            ERR, NOSYNC (LRCK static / no LATCH), NOCLK (no BCLK edges),
+            NOTIM (no timing for the format at this rate), OFF (S/PDIF
+            runs, I2S does not), PINHI (stopped, a pin high: lvl<hex> =
+            DATA, DR, BCLK, LRCK in bits 0..3), NOPIO
+    s       pattern violations (direct, nos) or frames differing from the
+            filtered S/PDIF reference (sharp, slow, minphase, sinc); "-"
+            when no sample check ran
+    L       cumulative blocks that missed the I2S output
+    e.g.    #812 ok i2s - tx48000/24 f320 z0 s0 e0 L0 B0 G0 K1
+            #812 ok dual16 sharp8 tx48000/24 f1280 z0 s0 e0 L0 B0 G0 K1
 
 The diagnostic string (tools/diag.py) supplies the boot count and the
 application status; its name<number> tokens are parsed generically.
@@ -87,6 +136,13 @@ PLAYER_DEPS = [PLAYER_SRC, os.path.join(REPO, "src", "selftest", "selftest_patte
 PLAYER_EXE = os.path.join(HERE, "build", "wasapi_play.exe")
 
 STRID_SELFTEST = 0x21
+STRID_SELFTEST_I2S = 0x22
+I2S_FORMATS = ("i2s", "lj", "rj24", "rj16", "dual16", "dual18", "dual20", "dual24")
+I2S_FILTERS = ("sharp", "nos", "slow", "minphase", "sinc")
+I2S_OVERSAMPLING_FILTERS = ("sharp", "slow", "minphase")
+# Filter token: an oversampling filter with the running output's
+# oversampling (bare while stopped), sinc, nos, or - (direct formats).
+_FILTER_TOKEN = re.compile(r"^(?:(sharp|slow|minphase)([48])?|(sinc|nos|-))$")
 
 SWEEP = [(48000, 16), (48000, 24), (44100, 24), (96000, 16), (88200, 16),
          (88200, 24), (32000, 24), (32000, 16), (44100, 16), (96000, 24)]
@@ -102,6 +158,7 @@ STOP_SILENCE_AT = 2.0   # s after the stream closed: still sending silence
 STOP_DONE_AT = 4.5      # s after the stream closed: output stopped
 DEVICE_COUNTERS = ("ur", "ov", "lt")      # must not increase while playing
 WINDOW_COUNTERS = ("B", "G", "K")
+I2S_COUNTERS = WINDOW_COUNTERS + ("L",)   # plus late filter blocks
 SOAK_WARMUP = 3.0
 SOAK_MARGIN = 2.0       # pattern keeps playing this long after the last read
 TONE_RATE, TONE_BITS = 48000, 24
@@ -208,6 +265,41 @@ def parse_report(s):
     return d
 
 
+def parse_i2s_report(s):
+    """I2S self-test report -> dict, None if s is not one."""
+    t = s.split()
+    if len(t) < 3 or not re.fullmatch(r"#\d+", t[0]) or t[2] not in I2S_FORMATS:
+        return None
+    d = {"raw": s, "seq": int(t[0][1:]), "state": t[1], "fmt": t[2], "pattern": True}
+    rest = t[3:]
+    m = _FILTER_TOKEN.match(rest[0]) if rest else None
+    if m:
+        d["flt"] = rest[0]
+        d["filter"] = m.group(1) or m.group(3)
+        d["osr"] = int(m.group(2)) if m.group(2) else None
+        rest = rest[1:]
+    for tok in rest:
+        m = re.fullmatch(r"tx(\d+)(?:/(\d+))?", tok)
+        if m:
+            d["tx"] = (int(m.group(1)), int(m.group(2) or 0))
+            continue
+        m = re.fullmatch(r"lvl([0-9A-F])", tok)
+        if m:
+            d["lvl"] = int(m.group(1), 16)
+            continue
+        m = re.fullmatch(r"@(\d+):([0-9A-F]{8})>([0-9A-F]{8})/([0-9A-F]{8})", tok)
+        if m:
+            d["viol"] = (int(m.group(1)), m.group(2), m.group(3), m.group(4))
+            continue
+        if tok == "s-":
+            d["pattern"] = False
+            continue
+        m = _INT_TOKEN.match(tok)
+        if m:
+            d[m.group(1)] = int(m.group(2))
+    return d
+
+
 def parse_diag(s):
     """Diagnostic string -> dict (boots, prev, app fields), None if not one."""
     head, sep, app = s.partition(" | ")
@@ -246,12 +338,14 @@ class Reader:
         self.verbose = verbose
 
     def read(self, tag=""):
-        """(diag dict, report dict, report raw); dicts are None if unreadable."""
+        """(diag dict, S/PDIF report dict, I2S report dict, S/PDIF report raw);
+        dicts are None if unreadable (the I2S dict carries its own raw)."""
         dg_raw = read_diag(self.backend, STRID_DIAG)
         st_raw = read_diag(self.backend, STRID_SELFTEST)
+        i2_raw = read_diag(self.backend, STRID_SELFTEST_I2S)
         if self.verbose:
-            print(f"    {tag:>8} {st_raw}  || {dg_raw.partition(' | ')[2]}")
-        return parse_diag(dg_raw), parse_report(st_raw), st_raw
+            print(f"    {tag:>8} {st_raw}  || {i2_raw}  || {dg_raw.partition(' | ')[2]}")
+        return parse_diag(dg_raw), parse_report(st_raw), parse_i2s_report(i2_raw), st_raw
 
 
 def ppm(fs, rate):
@@ -278,6 +372,42 @@ def check_output(st, rate, bits, pattern=True):
         f.append(f"fs{st.get('fs')} ({ppm(st.get('fs', 0), rate):+.0f} ppm)")
     if "viol" in st:
         f.append("first violation @%d: %s>%s/%s" % st["viol"])
+    return f
+
+
+def expected_osr(filt, rate):
+    """Oversampling of a running dual-line output with filter filt."""
+    if filt in I2S_OVERSAMPLING_FILTERS:
+        return 8 if rate < 50000 else 4
+    return None
+
+
+def check_i2s(i2, rate, bits, fmt=None, pattern=True, filt=None):
+    """Failure reasons for one I2S report while the given format plays; fmt /
+    filt: the expected jumper format and filter names (None: any)."""
+    if i2 is None:
+        return ["no I2S self-test report"]
+    f = []
+    if i2["state"] != "ok":
+        f.append(f"i2s state {i2['state']}")
+    if fmt and i2["fmt"] != fmt:
+        f.append(f"i2s format {i2['fmt']} (expected {fmt})")
+    if filt and i2.get("filter") != filt:
+        f.append(f"i2s filter {i2.get('flt')} (expected {filt})")
+    if i2["state"] in ("ok", "sil", "ERR") and "flt" in i2:
+        osr = expected_osr(i2["filter"], rate)
+        if i2["osr"] != osr:
+            f.append(f"i2s filter {i2['flt']} (expected {i2['filter']}{osr} at {rate} Hz)")
+    if i2.get("tx") != (rate, bits):
+        f.append(f"i2s checked against tx{i2.get('tx')}")
+    # Zero frames are only an error against the pattern; a numeric s is
+    # checked whenever the device ran a sample check (the oversampled
+    # formats compare against the filtered S/PDIF samples in every build).
+    for k in (("z",) if pattern else ()) + (("s",) if i2["pattern"] else ()) + ("e",):
+        if i2.get(k, 0) != 0:
+            f.append(f"i2s {k}{i2[k]}")
+    if "viol" in i2:
+        f.append("i2s first violation @%d: %s>%s/%s" % i2["viol"])
     return f
 
 
@@ -309,9 +439,10 @@ def check_volume(dg):
 
 
 def counter_increases(a, b):
-    """Increases of the device and window counters from read a to read b."""
+    """Increases of the device and window counters from read a to read b
+    (each a (diag, S/PDIF report, I2S report) triple)."""
     f = []
-    (dga, sta), (dgb, stb) = a, b
+    (dga, sta, i2a), (dgb, stb, i2b) = a, b
     if dga and dgb:
         for k in DEVICE_COUNTERS:
             if k in dga["fields"] and dgb["fields"].get(k, 0) > dga["fields"][k]:
@@ -320,6 +451,10 @@ def counter_increases(a, b):
         for k in WINDOW_COUNTERS:
             if stb.get(k, 0) > sta.get(k, 0):
                 f.append(f"{k} {sta.get(k, 0)} -> {stb[k]}")
+    if i2a and i2b:
+        for k in I2S_COUNTERS:
+            if i2b.get(k, 0) > i2a.get(k, 0):
+                f.append(f"i2s {k} {i2a.get(k, 0)} -> {i2b[k]}")
     return f
 
 
@@ -353,97 +488,113 @@ def wait_until(t0, at):
 # Sweep
 #--------------------------------------------------------------------------
 
-def play_item(rd, exe, device, rate, bits, boots):
+def play_item(rd, exe, device, rate, bits, boots, i2s_fmt, i2s_filter=None):
+    """(S/PDIF failures, I2S failures, last read)."""
     player = Player(exe, rate, bits, PLAY_SECONDS, device)
     t0 = time.time()
     reads = []
     for at in SAMPLE_AT:
         wait_until(t0, at)
-        dg, st, _ = rd.read(f"{at:.1f}s")
-        reads.append((dg, st))
+        dg, st, i2, _ = rd.read(f"{at:.1f}s")
+        reads.append((dg, st, i2))
     code, err = player.wait()
 
-    fails = []
+    fails, i2s_fails = [], []
     if code != 0:
         fails.append(f"player exit {code}: {err}")
-    for (dg, st), at in zip(reads, SAMPLE_AT):
+    for (dg, st, i2), at in zip(reads, SAMPLE_AT):
         for reason in (check_device(dg, rate, bits, boots) + check_output(st, rate, bits) +
                        check_trim(dg)):
             fails.append(f"@{at:.1f}s {reason}")
-    seqs = [st["seq"] for _, st in reads if st]
+        for reason in check_i2s(i2, rate, bits, i2s_fmt, filt=i2s_filter):
+            i2s_fails.append(f"@{at:.1f}s {reason}")
+    seqs = [st["seq"] for _, st, _ in reads if st]
     if any(a == b for a, b in zip(seqs, seqs[1:])):
         fails.append(f"stale reports (seq {seqs})")
     for reason in counter_increases(reads[0], reads[-1]):
-        fails.append(f"during playback: {reason}")
-    return fails, reads[-1]
+        (i2s_fails if reason.startswith("i2s ") else fails).append(f"during playback: {reason}")
+    return fails, i2s_fails, reads[-1]
 
 
 def stop_test(rd, rate, boots):
-    """Right after the last stream closed: silence, then the output stops."""
+    """Right after the last stream closed: silence, then the outputs stop."""
     t0 = time.time()
     fails = []
     wait_until(t0, STOP_SILENCE_AT)
-    dg1, st1, raw1 = rd.read(f"+{STOP_SILENCE_AT:.1f}s")
+    dg1, st1, i21, raw1 = rd.read(f"+{STOP_SILENCE_AT:.1f}s")
     if st1 is None:
         return ["no self-test report"], None, raw1
     if st1["state"] != "sil" or st1.get("z") != st1.get("f") or st1.get("tx", (0,))[0] != rate:
         fails.append(f"+{STOP_SILENCE_AT}s: expected silence at {rate} Hz: {raw1}")
+    if i21 is None:
+        fails.append(f"+{STOP_SILENCE_AT}s: no I2S self-test report")
+    elif i21["state"] != "sil" or i21.get("z") != i21.get("f") or i21.get("tx", (0,))[0] != rate:
+        fails.append(f"+{STOP_SILENCE_AT}s: expected I2S silence at {rate} Hz: {i21['raw']}")
     if dg1 and dg1["fields"].get("led", 0) != 0:
         fails.append(f"+{STOP_SILENCE_AT}s: LED still on")
     stopped_at = None
     while time.time() - t0 < STOP_DONE_AT - 0.2:
         time.sleep(0.2)
-        _, st, _ = rd.read(f"+{time.time() - t0:.1f}s")
+        _, st, _, _ = rd.read(f"+{time.time() - t0:.1f}s")
         if st and stopped_at is None and st.get("tx") == (0, 0):
             stopped_at = time.time() - t0
     wait_until(t0, STOP_DONE_AT)
-    dg2, st2, raw2 = rd.read(f"+{STOP_DONE_AT:.1f}s")
+    dg2, st2, i22, raw2 = rd.read(f"+{STOP_DONE_AT:.1f}s")
     if st2 is None:
         return fails + ["no self-test report"], stopped_at, raw2
     if st2["state"] != "idle" or st2.get("lvl") != 0 or st2.get("tx") != (0, 0):
         fails.append(f"+{STOP_DONE_AT}s: expected output stopped, line low: {raw2}")
+    if i22 is None:
+        fails.append(f"+{STOP_DONE_AT}s: no I2S self-test report")
+    elif i22["state"] != "idle" or i22.get("lvl") != 0 or i22.get("tx") != (0, 0):
+        fails.append(f"+{STOP_DONE_AT}s: expected I2S output stopped, pins low: {i22['raw']}")
     if st2["seq"] == st1["seq"]:
         fails.append("stale reports after the stop")
     if dg2 and dg2["boots"] != boots:
         fails.append("device rebooted")
-    for k in ("B", "G"):
-        if st2.get(k, 0) != st1.get(k, 0):
+    for k in ("B", "G", "L"):
+        if k != "L" and st2.get(k, 0) != st1.get(k, 0):
             fails.append(f"{k} {st1.get(k, 0)} -> {st2.get(k, 0)} during silence / stop")
+        if i21 and i22 and i22.get(k, 0) != i21.get(k, 0):
+            fails.append(f"i2s {k} {i21.get(k, 0)} -> {i22.get(k, 0)} during silence / stop")
     return fails, stopped_at, raw2
 
 
-def run_sweep(rd, exe, args, boots, uac1):
+def run_sweep(rd, exe, args, boots, uac1, i2s_fmt, i2s_filter=None):
     sweep = SWEEP_UAC1 if uac1 else SWEEP
     if args.only:
         rate, bits = (int(x) for x in args.only.split("/"))
         sweep = [(rate, bits)]
     results = []
     for rate, bits in sweep:
-        fails, (dg, st) = play_item(rd, exe, args.device, rate, bits, boots)
+        fails, i2s_fails, (dg, st, i2) = play_item(rd, exe, args.device, rate, bits, boots, i2s_fmt,
+                                                   i2s_filter)
         err = ppm(st["fs"], rate) if st and "fs" in st else float("nan")
-        results.append((f"{rate}/{bits}", fails, err))
+        results.append((f"{rate}/{bits}", fails, i2s_fails, err, i2.get("flt", "") if i2 else ""))
         print(f"{rate:6d} Hz {bits}-bit: {'PASS' if not fails else 'FAIL'}  {err:+6.0f} ppm  "
               f"{st['raw'] if st else ''}")
-        print(f"{'':20}app: {app_summary(dg)}")
-        for reason in fails[:6]:
+        print(f"{'':16}i2s: {'PASS' if not i2s_fails else 'FAIL'}  {i2['raw'] if i2 else ''}")
+        print(f"{'':16}app: {app_summary(dg)}")
+        for reason in fails[:6] + i2s_fails[:6]:
             print(f"        {reason}")
 
     if not args.no_stop:
         rate = sweep[-1][0]
         fails, stopped_at, raw = stop_test(rd, rate, boots)
         when = f"stopped after {stopped_at:.1f} s" if stopped_at is not None else "no stop seen"
-        results.append(("3-s stop", fails, float("nan")))
+        results.append(("3-s stop", fails, [], float("nan"), ""))
         print(f"3-s stop: {'PASS' if not fails else 'FAIL'}  ({when})  {raw}")
         for reason in fails:
             print(f"        {reason}")
 
     print()
-    print(f"{'item':<10} {'result':<6} {'ppm':>6}  first failure")
-    for name, fails, err in results:
+    print(f"{'item':<10} {'spdif':<6} {'ppm':>6}  {'i2s':<6} {'filter':<9} first failure")
+    for name, fails, i2s_fails, err, flt in results:
         err_s = "" if err != err else f"{err:+.0f}"
-        print(f"{name:<10} {'PASS' if not fails else 'FAIL':<6} {err_s:>6}  "
-              f"{fails[0] if fails else ''}")
-    ok = all(not f for _, f, _ in results)
+        i2s_s = "" if name == "3-s stop" else "PASS" if not i2s_fails else "FAIL"
+        first = fails[0] if fails else i2s_fails[0] if i2s_fails else ""
+        print(f"{name:<10} {'PASS' if not fails else 'FAIL':<6} {err_s:>6}  {i2s_s:<6} {flt:<9} {first}")
+    ok = all(not f and not i for _, f, i, _, _ in results)
     print("ALL PASS" if ok else "SOME FAILED")
     return ok
 
@@ -452,10 +603,11 @@ def run_sweep(rd, exe, args, boots, uac1):
 # Soak
 #--------------------------------------------------------------------------
 
-def run_soak(rd, exe, args, boots):
+def run_soak(rd, exe, args, boots, i2s_fmt, i2s_filter=None):
     rate, bits = args.rate, args.bits
     seconds = args.soak * 60.0
-    print(f"soak: {rate} Hz {bits}-bit for {args.soak:g} min, reading every "
+    flt = f" {i2s_filter}" if i2s_filter and i2s_fmt.startswith("dual") else ""
+    print(f"soak: {rate} Hz {bits}-bit, I2S {i2s_fmt}{flt}, for {args.soak:g} min, reading every "
           f"{args.interval:g} s")
     player = Player(exe, rate, bits, SOAK_WARMUP + seconds + SOAK_MARGIN, args.device)
     t0 = time.time()
@@ -477,9 +629,10 @@ def run_soak(rd, exe, args, boots):
 
     try:
         wait_until(t0, SOAK_WARMUP)
-        prev = rd.read("base")[:2]
+        prev = rd.read("base")[:3]
         for reason in (check_device(prev[0], rate, bits, boots) +
-                       check_output(prev[1], rate, bits) + check_trim(prev[0])):
+                       check_output(prev[1], rate, bits) + check_trim(prev[0]) +
+                       check_i2s(prev[2], rate, bits, i2s_fmt, filt=i2s_filter)):
             log(reason)
         next_at, next_progress = SOAK_WARMUP + args.interval, 60.0
         while next_at <= SOAK_WARMUP + seconds:
@@ -488,22 +641,23 @@ def run_soak(rd, exe, args, boots):
             if player.proc.poll() is not None:
                 log("player ended early")
                 break
-            cur = rd.read(f"{time.time() - t0:.0f}s")[:2]
-            dg, st = cur
+            cur = rd.read(f"{time.time() - t0:.0f}s")[:3]
+            dg, st, i2 = cur
             note_clock(dg)
             for reason in (check_device(dg, rate, bits, boots) + check_output(st, rate, bits) +
-                           check_trim(dg)):
+                           check_trim(dg) + check_i2s(i2, rate, bits, i2s_fmt, filt=i2s_filter)):
                 log(reason)
             for reason in counter_increases(prev, cur):
                 log(reason)
             if st and prev[1] and st["seq"] == prev[1]["seq"]:
                 log(f"stale report (seq {st['seq']})")
-            if st and dg:
+            if st and dg and i2:
                 prev = cur
             if time.time() - t0 >= next_progress:
                 next_progress += 60.0
                 print(f"{time.strftime('%H:%M:%S')} +{time.time() - t0:7.1f}s  "
-                      f"{len(events)} events  {st['raw'] if st else ''}  | {app_summary(dg)}")
+                      f"{len(events)} events  {st['raw'] if st else ''}  "
+                      f"{i2['raw'] if i2 else ''}  | {app_summary(dg)}")
         code, err = player.wait()
         if code != 0:
             log(f"player exit {code}: {err}")
@@ -525,23 +679,25 @@ def run_soak(rd, exe, args, boots):
 # Test tone build
 #--------------------------------------------------------------------------
 
-def run_tone(rd, boots):
-    """Tone build: framing, channel status and rate of the 48 kHz tone."""
+def run_tone(rd, boots, i2s_fmt, i2s_filter=None):
+    """Tone build: framing, channel status and rate of the 48 kHz tone, and
+    the I2S framing."""
     print(f"test-tone build: checking framing, channel status and rate at "
           f"{TONE_RATE} Hz {TONE_BITS}-bit (no pattern)")
     reads = []
     for i in range(5):
         if i:
             time.sleep(1.0)
-        dg, st, raw = rd.read(f"{i}")
-        reads.append((dg, st))
-        print(f"  {raw}")
+        dg, st, i2, raw = rd.read(f"{i}")
+        reads.append((dg, st, i2))
+        print(f"  {raw}  {i2['raw'] if i2 else ''}")
     fails = []
-    for dg, st in reads:
+    for dg, st, i2 in reads:
         fails += check_output(st, TONE_RATE, TONE_BITS, pattern=False)
+        fails += check_i2s(i2, TONE_RATE, TONE_BITS, i2s_fmt, pattern=False, filt=i2s_filter)
         if dg and dg["boots"] != boots:
             fails.append("device rebooted")
-    seqs = [st["seq"] for _, st in reads if st]
+    seqs = [st["seq"] for _, st, _ in reads if st]
     if any(a == b for a, b in zip(seqs, seqs[1:])):
         fails.append(f"stale reports (seq {seqs})")
     fails += counter_increases(reads[0], reads[-1])
@@ -566,29 +722,44 @@ def main():
     ap.add_argument("--interval", type=float, default=5.0, metavar="S",
                     help="soak read interval (default 5 s)")
     ap.add_argument("--device", help="playback device name part (default: the bridge in either mode)")
-    ap.add_argument("--status", action="store_true", help="print both reports once and exit")
+    ap.add_argument("--i2s-format", choices=I2S_FORMATS, metavar="FMT",
+                    help="expected I2S format, one of " + ", ".join(I2S_FORMATS) +
+                         " (default: what the device reports)")
+    ap.add_argument("--i2s-filter", choices=I2S_FILTERS, metavar="NAME",
+                    help="expected dual-line filter, one of " + ", ".join(I2S_FILTERS) +
+                         " (default: what the device reports)")
+    ap.add_argument("--status", action="store_true", help="print the three reports once and exit")
     args = ap.parse_args()
 
     rd = Reader(args.verbose)
-    dg, st, raw = rd.read("start")
+    dg, st, i2, raw = rd.read("start")
     for _ in range(10):     # first window after boot
         if not st or st["state"] != "wait":
             break
         time.sleep(0.2)
-        dg, st, raw = rd.read("start")
+        dg, st, i2, raw = rd.read("start")
     if args.status:
         print(dg["raw"] if dg else "<no diagnostic string>")
         print(raw)
+        print(i2["raw"] if i2 else "<no I2S self-test report>")
         return
     if dg is None:
         sys.exit(f"usb2spdif not found or not responding: {raw}")
     if st is None:
         sys.exit(f"no self-test report ({raw}): flash a build with -DUSB2SPDIF_SELFTEST=ON")
+    if i2 is None:
+        sys.exit("no I2S self-test report: flash a build with -DUSB2SPDIF_SELFTEST=ON")
     boots = dg["boots"]
     uac1 = dg["uac1"]
+    i2s_fmt = args.i2s_format or i2["fmt"]
+    i2s_filter = args.i2s_filter or i2.get("filter")
+    if i2s_filter == "-":
+        i2s_filter = None       # direct format: nothing to require
     print(f"device: {dg['raw']}")
     print(f"report: {raw}")
-    print(f"mode:   {'UAC1 (adaptive, 16 bit, up to 48 kHz)' if uac1 else 'UAC2'}")
+    print(f"i2s:    {i2['raw']}")
+    print(f"mode:   {'UAC1 (adaptive, 16 bit, up to 48 kHz)' if uac1 else 'UAC2'}, "
+          f"I2S format {i2s_fmt}, filter {i2.get('flt', '?')}")
     if args.bits is None:
         args.bits = 16 if uac1 else 24
     formats = [(args.rate, args.bits)] if args.soak else []
@@ -596,10 +767,10 @@ def main():
         formats.append(tuple(int(x) for x in args.only.split("/")))
     if uac1 and st["pattern"] and any(r not in UAC1_RATES or b != 16 for r, b in formats):
         sys.exit(f"UAC1 mode offers 16 bit at {', '.join(map(str, UAC1_RATES))} Hz only")
-    if st["state"] == "NOPIO":
+    if st["state"] == "NOPIO" or i2["state"] == "NOPIO":
         sys.exit("self-test could not claim a PIO state machine or DMA channel")
     if not st["pattern"]:
-        sys.exit(0 if run_tone(rd, boots) else 1)
+        sys.exit(0 if run_tone(rd, boots, i2s_fmt, i2s_filter) else 1)
 
     if sys.platform != "win32":
         sys.exit("the pattern player needs Windows (WASAPI)")
@@ -609,9 +780,9 @@ def main():
         sys.exit(str(e))
     set_volume_max(exe, args.device)
     if args.soak:
-        ok = run_soak(rd, exe, args, boots)
+        ok = run_soak(rd, exe, args, boots, i2s_fmt, i2s_filter)
     else:
-        ok = run_sweep(rd, exe, args, boots, uac1)
+        ok = run_sweep(rd, exe, args, boots, uac1, i2s_fmt, i2s_filter)
     sys.exit(0 if ok else 1)
 
 

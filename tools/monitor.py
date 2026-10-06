@@ -3,12 +3,14 @@
 Polls the device's diagnostic string (tools/diag.py) and its session string
 a few times per second and prints one timestamped line per event:
 
-    device connected / disconnected / rebooted (with the crash record)
-    stream opened (format and PCM data rate) / closed / format changed
+    device connected / disconnected / rebooted (with the crash record and
+        the configuration: board, firmware, build, USB mode, output format,
+        filter, jumper states)
+    stream opened (format, PCM data rate, volume) / closed / format changed
     playing (stream samples going out) / stalled / underrun
     S/PDIF output on / off (3 s after the audio ended)
     digital silence (all-zero samples for --silence seconds) / signal
-    volume changes, clock lock (UAC1), counter increases (ov, lt)
+    volume changes, clock lock (UAC1), counter increases (ov, lt, late I2S blocks)
 
 With --status N a status line is printed every N seconds while a stream is
 open: format, data rate, the sample rate measured from the device's frame
@@ -20,7 +22,8 @@ iteration, trim and the current silence.
     python tools/monitor.py --status 10 --log session.log
     python tools/monitor.py --silence 2 --interval 0.5
 
-Needs the firmware's session string (index 0x23). Short events between two
+Needs the firmware's session string (index 0x23); the configuration
+string (0x24) is optional (older firmware: "not reported"). Short events between two
 polls (a stream opened and closed within --interval) are not seen.
 """
 import argparse
@@ -29,7 +32,8 @@ import time
 
 import libusb_package
 
-from diag import STRID_DIAG, STRID_SESSION, parse_session, parse_status, read_diag
+from diag import (STRID_CONFIG, STRID_DIAG, STRID_SESSION, parse_config, parse_session,
+                  parse_status, read_diag)
 
 # Measured sample rate: frame counter against the PC clock over this window,
 # reported once half of it is filled. The USB read latency limits it to
@@ -59,6 +63,50 @@ def fmt_volume(v):
     if v is None:
         return "?"
     return "muted" if v == "M" else ("0 dB" if v == 0 else f"-{v} dB")
+
+
+BOARDS = {"rp2350-one": "Waveshare RP2350-One", "pico2": "Raspberry Pi Pico 2"}
+BUILDS = {"normal": "normal build", "selftest": "self-test build", "tone": "test-tone build",
+          "tone+selftest": "test-tone + self-test build"}
+FORMATS = {
+    "i2s": "I2S (Philips)", "lj": "left-justified", "rj24": "right-justified 24-bit",
+    "rj16": "right-justified 16-bit",
+    "dual16": "dual-line 16-bit (TDA1541A simultaneous mode), DEM clock on",
+    "dual18": "dual-line 18-bit (AD1865)", "dual20": "dual-line 20-bit (PCM63 / PCM1702)",
+    "dual24": "dual-line 24-bit",
+}
+FILTERS = {
+    "nos": "NOS, no digital filter",
+    "sharp": "sharp, linear phase, 8x at 32 / 44.1 / 48 kHz, 4x at 88.2 / 96 kHz",
+    "slow": "slow roll-off, linear phase, 8x at 32 / 44.1 / 48 kHz, 4x at 88.2 / 96 kHz",
+    "sinc": "NOS with sin(x)/x compensation, at the sample rate",
+    "minphase": "minimum phase, 8x at 32 / 44.1 / 48 kHz, 4x at 88.2 / 96 kHz",
+}
+FILTER_CODES = ["nos", "sharp", "slow", "sinc", "minphase"]
+
+
+def config_lines(cfg):
+    """The configuration string's fields as report lines."""
+    jumpers = cfg.get("jumpers", "?/???/???").split("/")
+    mode_j, fmt_j, flt_j = (jumpers + ["?", "???", "???"])[:3]
+    fw = cfg.get("fw", "")
+    fw = f"{int(fw[:2], 16)}.{fw[2:]}" if len(fw) == 4 and all(c in "0123456789abcdef" for c in fw) else fw
+    fmt, flt = cfg.get("format", "?"), cfg.get("filter", "?")
+    lines = [
+        f"board {BOARDS.get(cfg.get('board'), cfg.get('board'))}, firmware {fw}, "
+        f"{BUILDS.get(cfg.get('build'), cfg.get('build'))}",
+        f"USB {cfg.get('mode', '?').upper()} (mode jumper GP5 {'grounded' if mode_j == '1' else 'open'})",
+        f"output format {FORMATS.get(fmt, fmt)} (jumpers GP8 GP7 GP6 = {fmt_j})",
+    ]
+    code = int(flt_j, 2) if set(flt_j) <= {"0", "1"} and flt_j else None
+    reserved = code is not None and code >= len(FILTER_CODES)
+    if fmt.startswith("dual"):
+        lines.append(f"filter {FILTERS.get(flt, flt)} (jumpers GP2 GP3 GP4 = {flt_j}"
+                     f"{', a reserved code' if reserved else ''})")
+    else:
+        lines.append(f"filter none, I2S / LJ / RJ are never filtered (jumpers GP2 GP3 GP4 = {flt_j}: "
+                     f"{'reserved, sharp' if reserved else flt} for the dual-line formats)")
+    return lines
 
 
 class Monitor:
@@ -105,6 +153,7 @@ class Monitor:
             self.out(f"device connected: {mode}, {host}, boot {st['boots']}")
             if st["prev"] != "none":
                 self.out(f"  previous boot ended in: {st['prev']} ({raw.split(' | ')[0]})")
+            self.config_report()
         elif self.present is not None:
             self.out(f"device disconnected ({raw})")
             self.close_stream_state()
@@ -130,12 +179,14 @@ class Monitor:
             starts = (se["streams"] - self.sess["streams"]) & 0xFFFFFFFF
 
         if is_open and not was_open:
-            self.out(f"stream opened: {fmt_format(st['rate'], st['bits'])}")
+            self.out(f"stream opened: {fmt_format(st['rate'], st['bits'])}, "
+                     f"volume {fmt_volume(st['volume'])}")
             self.open_since = now
             self.streams_total += 1
             self.silent_since = None
         elif is_open and (fmt_changed or starts > 0):
-            self.out(f"stream restarted: {fmt_format(st['rate'], st['bits'])}"
+            self.out(f"stream restarted: {fmt_format(st['rate'], st['bits'])}, "
+                     f"volume {fmt_volume(st['volume'])}"
                      + (f" ({starts} starts)" if starts > 1 else ""))
             self.streams_total += 1
             self.frames_hist.clear()
@@ -179,6 +230,12 @@ class Monitor:
             if p is not None and is_open and inc > 0:
                 self.out(f"{name}: +{inc} ({f.get(key, 0)} this stream)")
 
+        if (se and self.sess and se.get("i2s_late") is not None
+                and self.sess.get("i2s_late") is not None):
+            inc = (se["i2s_late"] - self.sess["i2s_late"]) & 0xFFFFFFFF
+            if inc > 0:
+                self.out(f"late I2S block: +{inc} ({se['i2s_late']} since boot)")
+
         if p is not None and st["volume"] != p["volume"]:
             self.out(f"volume {fmt_volume(st['volume'])}")
 
@@ -211,6 +268,15 @@ class Monitor:
             self.out(f"device rebooted: boot {st['boots']}, previous ended in {st['prev']}"
                      + ("" if st["prev"] == "none" else f" ({raw.split(' | ')[0]})"))
             self.close_stream_state()
+            self.config_report()
+
+    def config_report(self):
+        cfg = parse_config(read_diag(self.backend, STRID_CONFIG))
+        if cfg is None:
+            self.out("  config: not reported (firmware without the configuration string)")
+            return
+        for line in config_lines(cfg):
+            self.out(f"  config: {line}")
 
     # ---- measured rate and status ---------------------------------------
 

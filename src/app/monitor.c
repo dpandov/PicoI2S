@@ -7,6 +7,7 @@
 #include "app/log.h"
 #include "app/status_led.h"
 #include "diag/diag.h"
+#include "i2s/i2s_tx.h"
 #include "spdif/spdif_tx.h"
 #include "usb/usb_audio.h"
 #include "usb/usb_descriptors.h"
@@ -124,8 +125,10 @@ void monitor_task(uint32_t events) {
     log_stats();
 }
 
+// Format documented in tools/diag.py: "n<streams> fr<frames> sig<ms|-> up<ms>
+// os<late>", at most 64 characters.
 const char *monitor_session_string(void) {
-    static char buf[64];
+    static char buf[80];
     audio_pipeline_session_t s;
     audio_pipeline_get_session(&s);
     int n = snprintf(buf, sizeof(buf), "n%lu fr%lu sig", (unsigned long)s.streams,
@@ -138,8 +141,52 @@ const char *monitor_session_string(void) {
         }
     }
     if (n > 0 && (size_t)n < sizeof(buf)) {
-        snprintf(buf + n, sizeof(buf) - (size_t)n, " up%lu",
-                 (unsigned long)(time_us_64() / 1000u));
+        snprintf(buf + n, sizeof(buf) - (size_t)n, " up%lu os%lu",
+                 (unsigned long)(time_us_64() / 1000u), (unsigned long)i2s_tx_late());
     }
+    return buf;
+}
+
+static i2s_format_t config_format;
+static unsigned config_filter_code;
+
+void monitor_set_config(i2s_format_t format, unsigned filter_code) {
+    config_format = format;
+    config_filter_code = filter_code;
+}
+
+// Three jumper bits, the highest first (as the README tables).
+static void bits3(char *s, unsigned code) {
+    for (unsigned i = 0; i < 3u; i++)
+        s[i] = (code >> (2u - i)) & 1u ? '1' : '0';
+    s[3] = '\0';
+}
+
+// Format documented in tools/diag.py, at most 105 characters. The filter
+// is the jumper setting even where it is not used (I2S / LJ / RJ).
+const char *monitor_config_string(void) {
+    static char buf[112];
+#if USB2SPDIF_BOARD_RP2350_ONE
+    const char *board = "rp2350-one";
+#else
+    const char *board = "pico2";
+#endif
+#if USB2SPDIF_TEST_TONE && USB2SPDIF_SELFTEST
+    const char *build = "tone+selftest";
+#elif USB2SPDIF_TEST_TONE
+    const char *build = "tone";
+#elif USB2SPDIF_SELFTEST
+    const char *build = "selftest";
+#else
+    const char *build = "normal";
+#endif
+    bool uac1 = usb_audio_mode() == USB_AUDIO_MODE_UAC1;
+    char fmt_bits[4], flt_bits[4];
+    bits3(fmt_bits, (unsigned)config_format);
+    bits3(flt_bits, config_filter_code);
+    snprintf(buf, sizeof(buf), "board=%s fw=%04x build=%s mode=%s format=%s filter=%s jumpers=%c/%s/%s",
+             board, USB_BCD_DEVICE, build, uac1 ? "uac1" : "uac2", i2s_format_name(config_format),
+             i2s_filter_name(i2s_filter_from_code(config_filter_code)), uac1 ? '1' : '0', fmt_bits,
+             flt_bits);
     return buf;
 }

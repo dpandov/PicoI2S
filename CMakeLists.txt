@@ -44,6 +44,7 @@ add_executable(usb2spdif
     src/app/test_tone.c
     src/clock/audio_clock.c
     src/diag/diag.c
+    src/i2s/i2s_tx.c
     src/spdif/spdif_encode.c
     src/spdif/spdif_tx.c
     src/usb/usb_audio.c
@@ -77,23 +78,26 @@ if(USB2SPDIF_TEST_TONE)
     target_compile_definitions(usb2spdif PRIVATE USB2SPDIF_TEST_TONE=1)
 endif()
 
-# Decodes the S/PDIF output on core 1 and reports it as a USB string, for
-# tools/selftest.py (src/selftest/selftest.h). With the test tone, only
-# framing and channel status are checked.
-option(USB2SPDIF_SELFTEST "Check the S/PDIF output on core 1" OFF)
+# Decodes the S/PDIF and I2S outputs on core 1 and reports them as USB
+# strings, for tools/selftest.py (src/selftest/selftest.h). With the test
+# tone, only framing and channel status are checked.
+option(USB2SPDIF_SELFTEST "Check the S/PDIF and I2S outputs on core 1" OFF)
 if(USB2SPDIF_SELFTEST)
     target_sources(usb2spdif PRIVATE
         src/selftest/selftest.c
         src/selftest/selftest_decode.c
+        src/selftest/selftest_i2s_decode.c
+        src/selftest/selftest_i2s_expect.c
         src/selftest/selftest_report.c
     )
     pico_generate_pio_header(usb2spdif ${CMAKE_CURRENT_LIST_DIR}/src/selftest/selftest_capture.pio)
     target_compile_definitions(usb2spdif PRIVATE USB2SPDIF_SELFTEST=1)
-    target_link_libraries(usb2spdif pico_multicore)
 endif()
 
+# Core 1 runs the I2S oversampling filter (and the self-test decoders).
 target_link_libraries(usb2spdif
     pico_stdlib
+    pico_multicore
     pico_unique_id
     hardware_clocks
     hardware_watchdog

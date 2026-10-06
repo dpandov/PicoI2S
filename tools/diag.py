@@ -47,9 +47,23 @@ Output fields:
          UAC1:  S1 44100/16 ff4935 ur0 run1 led1 tx44100 ov0 lt0 rmin144 fmax5400 lp212 tr361L v12
 
 A second hidden string (index 0x23, read by tools/monitor.py) carries the
-session counters since boot: "n<streams> fr<frames> sig<ms|-> up<ms>":
+session counters since boot: "n<streams> fr<frames> sig<ms|-> up<ms> os<late>":
 stream starts, frames moved to the output (wraps at 2^32), milliseconds
-since the last non-zero sample went out (- if none yet), uptime.
+since the last non-zero sample went out (- if none yet), uptime, and I2S
+blocks that missed their DMA buffer (i2s_tx_late(); absent in older
+firmware).
+
+A third hidden string (index 0x24, printed by this script and by
+tools/monitor.py) carries the configuration, fixed at boot:
+
+    board=<rp2350-one|pico2> fw=<bcdDevice hex> build=<normal|selftest|tone|
+        tone+selftest> mode=<uac2|uac1> format=<i2s|lj|rj24|rj16|dual16|
+        dual18|dual20|dual24> filter=<nos|sharp|slow|sinc|minphase>
+        jumpers=<GP5>/<GP8 GP7 GP6>/<GP2 GP3 GP4>
+
+    filter is what the filter jumpers select (reserved codes: sharp), also
+    for I2S / LJ / RJ, which never use it. jumpers: 1 = grounded.
+    e.g. board=rp2350-one fw=0103 build=normal mode=uac2 format=i2s filter=nos jumpers=0/000/000
 """
 import re
 import sys
@@ -63,6 +77,7 @@ VID = 0x1209
 PIDS = {0x0001: "UAC2", 0x0002: "UAC1"}
 STRID_DIAG = 0x20
 STRID_SESSION = 0x23
+STRID_CONFIG = 0x24
 LANGID_EN_US = 0x0409
 
 _INT_TOKEN = re.compile(r"^([a-z]+)(\d+)$")
@@ -130,18 +145,30 @@ def parse_status(s):
 
 
 def parse_session(s):
-    """Session string -> dict (streams, frames, signal_age_ms or None, up_ms)."""
-    m = re.fullmatch(r"n(\d+) fr(\d+) sig(\d+|-) up(\d+)", s.strip())
+    """Session string -> dict (streams, frames, signal_age_ms or None, up_ms,
+    i2s_late or None without the token)."""
+    m = re.fullmatch(r"n(\d+) fr(\d+) sig(\d+|-) up(\d+)( os(\d+))?", s.strip())
     if not m:
         return None
     return {"streams": int(m.group(1)), "frames": int(m.group(2)),
             "signal_age_ms": None if m.group(3) == "-" else int(m.group(3)),
-            "up_ms": int(m.group(4))}
+            "up_ms": int(m.group(4)),
+            "i2s_late": int(m.group(6)) if m.group(6) is not None else None}
+
+
+def parse_config(s):
+    """Configuration string -> dict of its key=value fields, or None (no
+    device, or firmware without the string)."""
+    fields = dict(t.split("=", 1) for t in s.split() if "=" in t)
+    return fields if "board" in fields and "format" in fields else None
 
 
 def main():
     count = int(sys.argv[1]) if len(sys.argv) > 1 else 1
     backend = libusb_package.get_libusb1_backend()
+    config = read_diag(backend, STRID_CONFIG)
+    if parse_config(config):
+        print("config:", config)
     for i in range(count):
         print(time.strftime("%H:%M:%S"), read_diag(backend))
         if i + 1 < count:

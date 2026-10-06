@@ -2,4 +2,5 @@ pyusb
 libusb-package
 sounddevice
 numpy
+matplotlib
 ziglang

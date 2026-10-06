@@ -335,13 +335,10 @@ static void begin_playing(const usb_audio_format_t *f, uint64_t now) {
     // Starts at the requested volume without a ramp: silence precedes it
     // (pre-roll, underrun or stopped output).
     p.att = att_target(usb_audio_volume());
-    if (start) {
-        audio_family_t fam = audio_clock_family(f->sample_rate);
-        if (fam != audio_clock_current_family()) {
-            audio_clock_set_family(fam);
-            diag_clock_changed();
-            log_printf("clock: %s family\n", fam == AUDIO_FAMILY_44K1 ? "44.1k" : "48k");
-        }
+    if (start && audio_clock_rate_changes(f->sample_rate)) {
+        uint32_t hz = audio_clock_set_rate(f->sample_rate);
+        diag_clock_changed();
+        log_printf("clock: %lu Hz\n", (unsigned long)hz);
     }
     top_up(f, now);
     if (start) {

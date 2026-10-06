@@ -497,9 +497,15 @@ uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid)
     if (index == STRID_SESSION) {
         return hidden_string_desc(monitor_session_string());
     }
+    if (index == STRID_CONFIG) {
+        return hidden_string_desc(monitor_config_string());
+    }
 #if USB2SPDIF_SELFTEST
     if (index == STRID_SELFTEST) {
         return hidden_string_desc(selftest_string());
+    }
+    if (index == STRID_SELFTEST_I2S) {
+        return hidden_string_desc(selftest_i2s_string());
     }
 #endif
 

@@ -9,17 +9,47 @@
 #endif
 
 // S/PDIF data to the Toslink transmitter input.
+// I2S / dual-line output (i2s/i2s_tx.h): DATA (DL in the dual-line modes)
+// and DR are consecutive PIO out pins; BCLK and LRCK (LATCH in the
+// dual-line modes) are consecutive side-set pins; DEM is the TDA1541 DEM
+// clock (dual-line 16 only, low otherwise).
 #if USB2SPDIF_BOARD_RP2350_ONE
-// At the end of the GP0..GP13 row, on the short side of the board.
-#define SPDIF_PIN 12
+// S/PDIF at the end of the GP0..GP13 row (the short side of the board);
+// I2S in the row next to 3V3: GP28, 27, 26, 15, 14 in order.
+#define SPDIF_PIN      12
+#define I2S_DATA_PIN   14
+#define I2S_DATA_R_PIN 15
+#define I2S_BCLK_PIN   26
+#define I2S_LRCK_PIN   27
+#define I2S_DEM_PIN    28
 #else
-// Physical pin 34, next to GND (33) and 3V3 (36).
-#define SPDIF_PIN 28
+// Pico 2: S/PDIF on physical pin 34 (GND on 33, 3V3 on 36); I2S on 21,
+// 22, 24, 25, 26 (GND on 23 and 28).
+#define SPDIF_PIN      28
+#define I2S_DATA_PIN   16
+#define I2S_DATA_R_PIN 17
+#define I2S_BCLK_PIN   18
+#define I2S_LRCK_PIN   19
+#define I2S_DEM_PIN    20
 #endif
 
 // USB audio class, read once at boot (internal pull-up): open = UAC2,
 // grounded = UAC1. Physical pin 7 on both boards (Pico 2: GND on pin 8).
 #define UAC_MODE_PIN 5
+
+// Output format jumpers, read once at boot (internal pull-ups): grounded =
+// 1, bit 0 first; the 3-bit code is an i2s_format_t. Pico 2: physical pins
+// 9, 10, 11 (GND on 8 and 13). On the RP2350-One all seven jumpers (GP2..GP8)
+// are on the side opposite the I2S pins.
+#define I2S_FORMAT_PIN0 6
+#define I2S_FORMAT_PIN1 7
+#define I2S_FORMAT_PIN2 8
+// Dual-line filter jumpers, read once at boot (internal pull-ups): grounded
+// = 1, bit 0 first; the 3-bit code is an i2s_filter_type_t (NOS when all
+// open, GP4 alone = sharp). Pico 2: physical pins 6, 5, 4 (GND on 3 and 8).
+#define I2S_FILTER_PIN0 4
+#define I2S_FILTER_PIN1 3
+#define I2S_FILTER_PIN2 2
 
 // Onboard LED: audio/LOCK indicator only. The RP2350-One has no plain LED;
 // its WS2812 is driven dim red. Its colour order is RGB, not the usual GRB

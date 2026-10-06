@@ -66,6 +66,7 @@ static uint32_t buffer_addr[2] __attribute__((aligned(8)));
 static int32_t pcm[SPDIF_TX_BUFFER_FRAMES * 2];
 static spdif_encoder_t encoder;
 static spdif_source_fn source_fn;
+static const spdif_tx_companion_t *companion;
 static volatile bool running;
 static uint32_t tx_rate;
 static uint32_t tx_div;          // integer PIO divider at zero trim
@@ -122,6 +123,8 @@ static bool __not_in_flash_func(fill_buffer)(uint b, bool live) {
     if (live && !chunk_clear(b, base))
         return false;
     source_fn(pcm, SPDIF_TX_BUFFER_FRAMES);
+    if (companion)
+        companion->fill(b, pcm, SPDIF_TX_BUFFER_FRAMES, live);
     // Pins the block position to the buffer, whatever was skipped before.
     encoder.frame = b * SPDIF_TX_BUFFER_FRAMES;
     for (uint32_t f = 0; f < SPDIF_TX_BUFFER_FRAMES; f += CHUNK_FRAMES) {
@@ -258,8 +261,6 @@ static bool tx_start(uint32_t sample_rate, uint8_t word_bits, spdif_source_fn so
     tx_bits = word_bits;
     buf_us = (SPDIF_TX_BUFFER_FRAMES * 1000000u + sample_rate / 2u) / sample_rate;
     spdif_encoder_init(&encoder, cs);
-    fill_buffer(0, false);
-    fill_buffer(1, false);
 
     pio_sm_config c = spdif_tx_program_get_default_config(tx_offset);
     sm_config_set_out_pins(&c, tx_pin, 1);
@@ -267,8 +268,17 @@ static bool tx_start(uint32_t sample_rate, uint8_t word_bits, spdif_source_fn so
     sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_TX);
     sm_config_set_clkdiv_int_frac8(&c, div, 0);
     pio_sm_init(tx_pio, tx_sm, tx_offset, &c);
-
     configure_dma();
+
+    if (companion && !companion->prepare(sample_rate)) {
+        tx_rate = 0;
+        tx_error_ppb = 0;
+        tx_bits = 0;
+        return false;
+    }
+    fill_buffer(0, false);
+    fill_buffer(1, false);
+
     dma_hw->irq_ctrl[DMA_IRQ_INDEX].ints = dma_mask;
     irq_buf = 0;
     late_prev = false;
@@ -277,9 +287,13 @@ static bool tx_start(uint32_t sample_rate, uint8_t word_bits, spdif_source_fn so
 
     running = true;
     // The control channel loads buffer 0 and starts the data channel. DMA
-    // first so the FIFO is full before the SM pulls its first word.
+    // first so the FIFO is full before the SM pulls its first word. The
+    // companion's state machine starts in the same write.
     dma_channel_start(dma_ctrl);
-    pio_sm_set_enabled(tx_pio, tx_sm, true);
+    uint32_t sm_mask = 1u << tx_sm;
+    if (companion)
+        sm_mask |= companion->arm();
+    pio_enable_sm_mask_in_sync(tx_pio, sm_mask);
     return true;
 }
 
@@ -313,6 +327,16 @@ static void tx_stop(void) {
     pio_sm_restart(tx_pio, tx_sm);
     // Idle line: pin driven low, Toslink LED off.
     pio_sm_set_pins_with_mask64(tx_pio, tx_sm, 0, 1ull << tx_pin);
+    if (companion)
+        companion->stop();
+}
+
+PIO spdif_tx_pio(void) {
+    return tx_pio;
+}
+
+void spdif_tx_set_companion(const spdif_tx_companion_t *c) {
+    companion = c;
 }
 
 bool spdif_tx_running(void) {
@@ -367,6 +391,8 @@ bool spdif_tx_set_trim_ppb(int32_t ppb) {
         return false;
     trim_ppb = spdif_trim_clamp(ppb);
     spdif_trim_set_target(&trim, spdif_trim_divider(tx_div, trim_ppb), timer_hw->timerawl);
+    if (companion)
+        companion->set_trim_ppb(trim_ppb);
     return true;
 }
 
@@ -375,8 +401,12 @@ int32_t spdif_tx_trim_ppb(void) {
 }
 
 void spdif_tx_trim_task(void) {
+    if (!running)
+        return;
+    if (companion)
+        companion->trim_task();
     // On a whole FRAC step there is nothing to dither.
-    if (!running || trim.applied == trim.target)
+    if (trim.applied == trim.target)
         return;
     uint32_t reg = spdif_trim_clkdiv_reg(spdif_trim_dither(&trim, timer_hw->timerawl));
     if (reg != trim_reg) {

@@ -4,6 +4,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "hardware/pio.h"
+
 // Frames per DMA buffer. The two buffers together are one channel-status
 // block (SPDIF_BLOCK_FRAMES).
 #define SPDIF_TX_BUFFER_FRAMES 96
@@ -18,6 +20,39 @@ typedef void (*spdif_source_fn)(int32_t *pcm, uint32_t n_frames);
 
 // Claims a PIO state machine and two DMA channels. Pin is driven low.
 void spdif_tx_init(unsigned pin);
+
+// The transmitter's PIO block, for a companion's state machine.
+PIO spdif_tx_pio(void);
+
+// A second output run in lockstep from the same frames (i2s/i2s_tx.h):
+// its state machine sits on spdif_tx_pio() and is enabled in the same
+// write as the S/PDIF one, and it gets every block of frames the S/PDIF
+// interrupt fetches. All callbacks are called with interrupts as the
+// caller has them; fill() runs in the DMA interrupt.
+typedef struct {
+    // From spdif_tx_start(), after the S/PDIF state machine and DMA are
+    // configured, before the buffers are pre-filled. Set up for
+    // sample_rate (program, divider, DMA chain). false fails the start.
+    bool (*prepare)(uint32_t sample_rate);
+    // The n_frames interleaved L/R samples, 32-bit left-justified, just
+    // fetched for buffer b (0 or 1). live: the DMA runs, so write only
+    // what it is clear of (the S/PDIF side has already checked its own
+    // buffer b is clear at the start).
+    void (*fill)(unsigned b, const int32_t *pcm, uint32_t n_frames, bool live);
+    // Just before the state machines are enabled: start the DMA chain so
+    // the TX FIFO is full. Returns the state-machine mask to enable in
+    // sync with the S/PDIF one.
+    uint32_t (*arm)(void);
+    // From spdif_tx_stop(), after the S/PDIF DMA is aborted and its state
+    // machine disabled: stop and park the pins.
+    void (*stop)(void);
+    // Mirror of spdif_tx_set_trim_ppb() / spdif_tx_trim_task().
+    void (*set_trim_ppb)(int32_t ppb);
+    void (*trim_task)(void);
+} spdif_tx_companion_t;
+
+// Registers (or, with NULL, removes) the companion. Before the first start.
+void spdif_tx_set_companion(const spdif_tx_companion_t *c);
 
 // Starts output at sample_rate with word_bits (16 or 24) in the channel
 // status. The PIO clock divider must come out as an integer within
