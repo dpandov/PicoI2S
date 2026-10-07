@@ -15,6 +15,7 @@ a USB Audio Class 1.0 mode (see [UAC1 mode](#uac1-mode)).
 |---|---|---|---|
 | UAC2 (default) | 32, 44.1, 48, 88.2, 96 kHz | 16, 24 | 2 (stereo) |
 | UAC1 (GP5 to GND) | 32, 44.1, 48 kHz | 16 | 2 (stereo) |
+| S/PDIF input | 32, 44.1, 48, 88.2, 96 kHz | up to 24 | 2 (stereo) |
 
 ## Hardware
 
@@ -226,17 +227,61 @@ pin 8, and the status LED is the onboard LED on GPIO 25; the I2S pins and the
 format and filter jumpers (pins 9 to 11 and 4 to 6) are in the tables
 above.
 
+### S/PDIF input
+
+An external S/PDIF source (a CD transport, a streamer) can feed the
+bridge through a coax or a Toslink input. It plays whenever USB is not
+available, through the selected filter to the I2S / dual-line pins, and
+is re-transmitted unchanged on the S/PDIF output.
+
+| Input | RP2350-One | Pico 2 |
+|---|---|---|
+| Coax (priority) | GP10 | pin 31 (GP26) |
+| Toslink | GP11 | pin 32 (GP27) |
+| GND | GND | pin 33 |
+
+Toslink: a 3.3 V receiver module, output straight to the pin. Coax: 75 ohm
+termination, a coupling capacitor and a self-biased inverter or
+comparator that turns the 0.5 V signal into 3.3 V logic. Both inputs have
+pull-downs, so an unconnected input reads as no signal. If both carry a
+signal, coax plays; a coax signal that appears takes over from Toslink.
+
+- Rates: 32, 44.1 and 48 kHz, also 88.2 and 96 kHz; 176.4 / 192 kHz are
+  not decoded. Lock takes about 20 ms.
+- USB has priority. USB counts as not available after 3 s without an
+  audible sample: no host, no stream, a stalled stream, or a stream of
+  digital silence (some hosts keep one open). The first audible USB sample
+  takes the output back. A switch mutes briefly.
+- The output clock follows the source: the Pico keeps its own crystal and
+  steers the output rate to the input's (as in UAC1 mode), so the samples
+  stay bit-exact and the source's jitter does not reach the DACs.
+- Volume is fixed at 0 dB. Non-PCM data (Dolby Digital, DTS) is muted.
+- Pre-emphasis: when the source flags 50/15 us pre-emphasis (some CDs),
+  the I2S / dual-line output applies de-emphasis before the filter, NOS
+  included: a per-rate digital filter matching the analogue curve within
+  0.004 dB at 44.1 / 48 kHz, never boosting, with errors far below the
+  24-bit LSB. A change of the flag between tracks fades over about 2 ms.
+  The S/PDIF output passes the flag on unchanged.
+
 ### Status LED
 
-The status LED (the RP2350-One's WS2812 RGB LED on GP16, lit dim red,
-colour and brightness in `src/board_config.h`; the Pico 2's onboard LED on
-GPIO 25) shows whether audio is playing:
+The status LED (the RP2350-One's WS2812 RGB LED on GP16, colours and
+brightness in `src/board_config.h`; the Pico 2's onboard LED on GPIO 25)
+shows whether audio is playing, and on the RP2350-One from which source:
 
 | LED | Meaning |
 |---|---|
-| 2 short flashes | The host has just enumerated the device |
-| On | The host is streaming audio to the device |
-| Off | No audio: no host, host idle, or stream closed |
+| 2 short flashes (red) | The host has just enumerated the device |
+| On (red on the RP2350-One) | The host is streaming audio to the device |
+| Green (RP2350-One; Pico 2: on) | The S/PDIF input is playing |
+| Yellow (RP2350-One; Pico 2: on) | The S/PDIF input is playing, with pre-emphasis |
+| Off | No audio: no host, host idle, or stream closed, and no input playing |
+
+On the Pico 2 two external LEDs (each an LED and series resistor to GND,
+active high) share the GND on pin 28: LOCK on GP22 (pin 29) is lit
+whenever an S/PDIF input is locked, also while USB has priority; EMPH on
+GP21 (pin 27) is lit while the input plays with pre-emphasis, which the
+I2S output corrects (the yellow of the RP2350-One).
 
 "Audio" means the host has the stream open and is sending samples. Digital
 silence inside an open stream still counts as audio.
@@ -376,9 +421,11 @@ src/
   usb/              USB descriptors, UAC2 / UAC1 class, TinyUSB config
   app/              audio pipeline, adaptive clock servo (UAC1), status LED,
                     console / diagnostic status, test tone
-  spdif/            S/PDIF encoder, PIO program, DMA driver
+  spdif/            S/PDIF transmitter (encoder, PIO program, DMA driver)
+                    and receiver (PIO decoder, parser, input selection)
   i2s/              I2S / dual-line output: program generator, packer,
-                    dual-line filters (core 1), TDA1541A DEM clock
+                    dual-line filters and de-emphasis (core 1), TDA1541A
+                    DEM clock
   clock/            system PLL per sample rate
   diag/             crash and hang diagnostics
   selftest/         optional S/PDIF and I2S self-test (decoders on core 1)
@@ -558,9 +605,17 @@ of it.
   stream formats (self-test capture) alongside the S/PDIF sweep; the
   dual-line formats, the five filters and the DEM clock pass the host
   tests (the filters bit-exact against their C reference) and the
-  cycle-accurate PIO simulation for every format and clock. Checks on the
-  board with the format and filter jumpers, UAC1 with the I2S output, and
-  DAC tests are pending. No listening tests yet.
+  cycle-accurate PIO simulation for every format and clock. An AD1865 in
+  dual-line 18, set up with the format and filter jumpers, plays
+  correctly with the available filters. UAC1 with the I2S output, an I2S
+  DAC and a TDA1541A (with the DEM clock) are still to be tested.
+- S/PDIF input (step 12): tested end to end on the board with an
+  internal test source at all five rates, with the source up to
+  +-1000 ppm off, in both USB modes: the S/PDIF output re-transmits it
+  bit-exact, the dual-line output (dual18, minimum phase) is bit-exact
+  against the filter, with and without de-emphasis, and USB takes over
+  and hands back as designed. Verified with a streamer on the Toslink
+  input at 44.1 / 48 / 96 kHz; a real coax receiver is still to be tested.
 
 Known limitations:
 

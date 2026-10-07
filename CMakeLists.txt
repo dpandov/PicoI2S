@@ -46,12 +46,15 @@ add_executable(usb2spdif
     src/diag/diag.c
     src/i2s/i2s_tx.c
     src/spdif/spdif_encode.c
+    src/spdif/spdif_rx.c
+    src/spdif/spdif_rx_parse.c
     src/spdif/spdif_tx.c
     src/usb/usb_audio.c
     src/usb/usb_descriptors.c
 )
 
 pico_generate_pio_header(usb2spdif ${CMAKE_CURRENT_LIST_DIR}/src/spdif/spdif_tx.pio)
+pico_generate_pio_header(usb2spdif ${CMAKE_CURRENT_LIST_DIR}/src/spdif/spdif_rx.pio)
 
 # Includes are written relative to src/ (e.g. "usb/usb_audio.h").
 # TinyUSB includes tusb_config.h by bare name, hence src/usb.

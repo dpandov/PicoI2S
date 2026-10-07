@@ -24,6 +24,7 @@ enum {
     DIAG_MARK_FB_PARAMS,
     DIAG_MARK_CLOCK_REQ,
     DIAG_MARK_VOLUME_REQ,
+    DIAG_MARK_SPDIF_RX,
 };
 
 // Live counters, incremented by the code they describe.

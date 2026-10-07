@@ -33,6 +33,18 @@
 #define I2S_DEM_PIN    20
 #endif
 
+// S/PDIF inputs (spdif/spdif_rx.h), played when USB is not available: a
+// coax receiver (75 ohm termination, AC coupling, self-biased inverter or
+// comparator) and a 3.3 V Toslink receiver module. Coax has priority.
+#if USB2SPDIF_BOARD_RP2350_ONE
+#define SPDIF_IN_COAX_PIN    10
+#define SPDIF_IN_TOSLINK_PIN 11
+#else
+// Pico 2: physical pins 31 and 32, beside GND (33) and the S/PDIF output.
+#define SPDIF_IN_COAX_PIN    26
+#define SPDIF_IN_TOSLINK_PIN 27
+#endif
+
 // USB audio class, read once at boot (internal pull-up): open = UAC2,
 // grounded = UAC1. Physical pin 7 on both boards (Pico 2: GND on pin 8).
 #define UAC_MODE_PIN 5
@@ -52,8 +64,12 @@
 #define I2S_FILTER_PIN2 2
 
 // Onboard LED: audio/LOCK indicator only. The RP2350-One has no plain LED;
-// its WS2812 is driven dim red. Its colour order is RGB, not the usual GRB
-// (sent green first it lights green).
+// its WS2812 shows the source heard, dim: red for USB, green for the S/PDIF
+// input, yellow for the input with pre-emphasis. Values set by eye: the
+// green die is far brighter than the red one, so green runs at a fraction
+// of red's value (yellow needs the smallest step), and the plain green is
+// a cold tint, so a step of red warms it. Its colour order is RGB, not the
+// usual GRB (sent green first it lights green).
 #if USB2SPDIF_BOARD_RP2350_ONE
 #define LOCK_LED_PIN       16
 #define LOCK_LED_WS2812    1
@@ -61,9 +77,20 @@
 #define LOCK_LED_R         0x0A
 #define LOCK_LED_G         0x00
 #define LOCK_LED_B         0x00
+#define LOCK_LED_INPUT_R   0x01
+#define LOCK_LED_INPUT_G   0x02
+#define LOCK_LED_INPUT_B   0x00
+#define LOCK_LED_EMPH_R    0x0A
+#define LOCK_LED_EMPH_G    0x01
+#define LOCK_LED_EMPH_B    0x00
 #else
 #define LOCK_LED_PIN    PICO_DEFAULT_LED_PIN
 #define LOCK_LED_WS2812 0
+// External S/PDIF input LEDs (active high, series resistor to GND): LOCK
+// on physical pin 29, EMPH (the input plays with pre-emphasis, which the
+// I2S output corrects) on pin 27, GND between them on 28.
+#define INPUT_LOCK_LED_PIN 22
+#define INPUT_EMPH_LED_PIN 21
 #endif
 
 #define CONSOLE_UART      uart0

@@ -34,7 +34,10 @@ Full design and hardware notes are in `README.md`; read it first. Key points:
 - LED (RP2350-One: the WS2812 on GP16, dim red, driven by a PIO state
   machine in `app/status_led.c`; Pico 2: GPIO 25): on while audio is
   playing, off otherwise, plus two short flashes on enumeration (two). No
-  other blink patterns.
+  other blink patterns. With the S/PDIF input (step 12) the RP2350-One
+  shows the source in colour (red USB, green input, yellow input with
+  pre-emphasis) and the Pico 2 adds external LOCK and EMPH LEDs on GP22
+  and GP21.
 - Pins: S/PDIF data on GP12 (`SPDIF_PIN`; Pico 2: GPIO 28, next to 3V3
   and GND). The status LED is reserved as the audio/LOCK indicator; do not
   use it for anything else. UART0 on GPIO 0/1 is the console. GPIO 5
@@ -45,7 +48,8 @@ Full design and hardware notes are in `README.md`; read it first. Key points:
   (bits 0..2, Pico 2 physical 9, 10, 11) and dual-line filter jumpers
   GP4 / GP3 / GP2 (bits 0..2, Pico 2 physical 6, 5, 4), all with internal
   pull-ups, read once at boot, grounded = 1. All jumpers open = UAC2,
-  I2S, no digital filter (NOS); keep it that way.
+  I2S, no digital filter (NOS); keep it that way. S/PDIF inputs (step
+  12): coax GP10, Toslink GP11 (Pico 2: GP26, GP27), pull-downs.
 
 ## Toolchain
 
@@ -100,7 +104,8 @@ generated analysis go in `scratch/` at the repository root. This folder and
   - `src/app/`: application behaviour (audio pipeline, status LED,
     console and diagnostic status line).
   - `src/diag/`: crash and hang diagnostics.
-  - `src/spdif/`: S/PDIF transmitter (PIO program, DMA, subframe builder).
+  - `src/spdif/`: S/PDIF transmitter (PIO program, DMA, subframe builder)
+    and receiver (PIO decoder, DMA, parser, lock and input selection).
   - `src/i2s/`: I2S / dual-line transmitter (program generator, packer,
     dual-line filters on core 1, DEM clock); its companion hook is in
     `spdif_tx.h`.
@@ -506,12 +511,13 @@ generated analysis go in `scratch/` at the repository root. This folder and
      found a self-test flaw: a capture starting inside a clipped run (the
      filter's overshoot at the pattern's wraps, 8+ frames with minimum
      phase) keyed the locate on clip values and matched the wrong wrap;
-     the key now skips silent and clipped frames. Pending: the format and
-     filter jumpers on the real board, UAC1 with the three state machines,
-     DEM on the board,
-     bring-up and listening on a PCM5102 / ES9023 board (I2S) and an
-     AD1865 or TDA1541A board (dual-line), the short soak in both modes;
-     then the README wiring and format table are final.
+     the key now skips silent and clipped frames. On real hardware: an
+     AD1865 in dual-line 18, format and filter set by the jumpers, played
+     successfully with the available filters (owner's test). Pending:
+     UAC1 with the three state machines, DEM on the board, bring-up and
+     listening on a PCM5102 / ES9023 board (I2S) and a TDA1541A board
+     (dual-line 16), the short soak in both modes; then the README wiring
+     and format table are final.
    - Known limitation: in UAC1 mode the servo dither is a sawtooth phase
      error of up to one clk_sys cycle (about 7 ns) on the I2S clocks;
      asynchronous DACs ignore it, synchronous ones see it as low-level
@@ -563,6 +569,187 @@ generated analysis go in `scratch/` at the repository root. This folder and
     0x24, `monitor_config_string()`: board, bcdDevice, build options, USB
     mode, I2S format, filter, jumper bits; fixed at boot), is printed by
     `monitor.py` on connect and after a reboot, and by `diag.py`.
+12. S/PDIF input (code done; verified on the host and end to end on the
+    board with a test source, see the status below; real receivers
+    pending). An external S/PDIF source plays through the selected filter
+    to the I2S / dual-line pins whenever USB is not available.
+    - Inputs: coax and Toslink, each on its own pin (`SPDIF_IN_COAX_PIN`,
+      `SPDIF_IN_TOSLINK_PIN`, pull-downs so an unconnected input is a
+      static low). RP2350-One: coax GP10, Toslink GP11. Pico 2: coax GP26
+      (pin 31), Toslink GP27 (pin 32), beside GND (33) and the S/PDIF
+      output (34). Toslink: a 3.3 V receiver module; coax: 75 ohm
+      termination, AC coupling and a self-biased inverter or comparator.
+      The receiver selects the locked input, coax first; a coax lock takes
+      over from Toslink.
+    - Receiver (`spdif/spdif_rx.c`, portable parser `spdif_rx_parse.c`,
+      `spdif_rx.pio`): one 26-instruction program on pio0 (never the
+      transmitter's block), one state machine per input, 8 state-machine
+      cycles per cell (divider clk_sys / (1024 x Fs), 8-bit fraction, set
+      per nominal rate and on every clk_sys change). It waits for each
+      slot-start edge, records the level after it and picks the polarity
+      of the next wait about 1.4 cells later; one word per subframe
+      (preamble cells 4..6, the slot levels, autopush 32; bit k = NOT(L_k
+      XOR L_k+1), even parity reduces to bit 3 == bit 31). The hunt looks
+      for a 3-cell run of one polarity only (B and M contain an opposite
+      3-cell run); the CPU restarts the hunt after 8 bad subframes in a
+      row. Margins (cycle-level model, +-1000 ppm, +-2 ns jitter): duty-
+      cycle distortion up to about 50 ns (30 % of a cell) at 44.1 / 48
+      kHz, 2.4x a Toslink module's 15..20 ns; 96 kHz 22..25 ns at its own
+      clock, 18 ns while clk_sys is still at 101.6 / 102.4 MHz.
+      Subframes go by DMA (endless transfer) into an 8 KB ring per input;
+      `spdif_rx_task()` (main loop, at most once per ms) checks preamble
+      order and parity, assembles the channel status (subframe A, B if A
+      is bad), hunts the rate (5 ms per divider), measures it against the
+      timer (2 ms estimate, ±4 % picks the nominal rate; lock after a clean
+      16 ms window within ±1200 ppm; re-check every 16 ms at ±1500 ppm),
+      and drops the lock after 2 ms without words or 8 bad subframes (held
+      4 ms, 50 ms after a clk_sys change, while it resyncs). A subframe is
+      used only after 8 good ones in a row and with its frame and the next
+      one good (about 1 garbage word in 16 passes preamble and parity);
+      a bad one zeroes its frame, the one before and 8 subframes after.
+      Frames 0..5 of each block wait for channel-status bits 0..5, so
+      non-PCM (muted, zeros) and emphasis (consumer byte 0 & 0x38 = 0x08,
+      professional 110) apply to exactly their block; word length from
+      bits 32..35. FIFO of 2048 frames (21 ms at 96 kHz); a flag-change
+      ring splits `spdif_rx_read()` chunks. Every discontinuity (lock,
+      unlock, input or rate change, overflow, clock change) flushes it and
+      bumps `spdif_rx_generation()`. Measured on the board (loopback, both
+      state machines on GP12): 6 clk_sys x 5 rates x +-1000 ppm bit-exact,
+      8.4 M-frame soak, lock about 18 ms, unlock 7..8 ms, a coax takeover
+      18..35 ms, clock switches during reception keep the lock. Core 0:
+      2.3 / 2.4 % at 44.1 / 48 kHz with one input receiving (3.8 / 3.9 %
+      with both), 4.3 % at 96 kHz, 0.3 % idle; RAM about 34 KB. A rate
+      change without a signal gap (44.1 <-> 48) carries up to 16..32 ms of
+      frames under the old nominal rate.
+    - Resources: pio2 transmitter block (the SDK's free-SM search starts at
+      the last block; RP2350-One: WS2812, S/PDIF, I2S, DEM: full), pio0
+      receiver (2 SMs, 26 instructions), pio1 self-test captures (they skip
+      the transmitter's block, prefer pio2, then pio1); DMA 2 + 2 + 2 (+ 2
+      self-test) of 16. State machines are enabled and disabled with the
+      atomic CTRL aliases where a block may be shared across the cores.
+    - Source arbitration (`app/audio_pipeline.c`, `p.src` owns the ring
+      and the output): USB has priority. The input takes the output after
+      3 s without an audible USB sample (non-zero after the volume, so a
+      muted host is silence; boot counts as USB activity), when the
+      receiver reports a selected input with known channel status. While
+      it plays, an open USB stream is drained to its FIFO set point
+      (discarded, watched); the first audible chunk takes the output back
+      (that chunk is dropped, then the normal USB pre-roll). The input
+      gives up the output 3 s after its last frame (the stop rule); an open
+      USB stream then plays as before. Every switch stops the output,
+      resets the per-stream stats and pre-rolls the new source; the clock
+      switches before the input pre-roll, which waits for `cs_valid` and
+      the set point plus what the start pulls out. A generation change is
+      a stall, not an underrun: a relock at the same rate resumes (servo
+      resumed), another rate stops, switches and restarts, another input
+      starts the servo fresh. Non-PCM (zeros) counts as audio. USB-only
+      behaviour is trace-identical to the previous pipeline in a host
+      simulation in both modes.
+    - Clocking, option A: the clock servo (`clock_servo`) steers the output
+      to the input in both USB modes, fed with the receiver FIFO level
+      (8-byte frames, set point FIFO_SETPOINT_PACKETS x ceil(Fs / 1000)
+      frames, i.e. 6 ms, chunk 96), started with
+      `SPDIF_TX_START_TRIMMED | SPDIF_TX_START_EMPHASIS` (UAC1 USB:
+      `TRIMMED`; UAC2 USB: 0, untrimmed). Bit-perfect, NOS stays
+      unfiltered, input jitter rejected; the cost is the UAC1 sawtooth (up
+      to one clk_sys cycle, about 6.5 ns, repeating at the residual offset
+      x clk_sys, so it can fall in the audio band). If the scope or
+      listening shows it matters, add option C: an ASRC for the
+      oversampling filters only (NOS and sinc stay on the servo), which
+      needs an explicit exception to "never resample" for this path.
+      Prototype measured on the board (bit-exact with the host): ASRC
+      after the first 2x stage, sharp 16 taps x 256 phases -113 dB THD+N
+      at 44.1 / 48 kHz, core 1 57 / 62 % (16 KB table); slow / minimum
+      phase 32 x 128 -109 / -111 dB, 67..77 %; at 1x (the only place for
+      NOS) at best -95..-99 dB; after the 8x cascade -120 dB but 100 %
+      load. Not chosen: ASRC for every filter (NOS loses its meaning), a
+      VCXO in place of the crystal (pull range below the +-1000 ppm of
+      S/PDIF level II sources, module rework), a receiver + ASRC chip (not
+      bit-perfect).
+    - S/PDIF output in input mode: re-transmits the input, bit-exact and
+      reclocked, 0 dB; word length 16 if the channel status gives <= 16,
+      else 24; the emphasis flag is copied into its channel status
+      (sources return `SPDIF_TX_FLAG_EMPHASIS` per block; the pipeline
+      keeps one flag byte per ring frame and `ring_source()` returns the
+      flags of the block's middle frame).
+    - De-emphasis (every I2S / dual-line format, NOS and the direct
+      formats included): `i2s/i2s_deemph.h`, one biquad per rate
+      (`tools/i2s_deemph_design.py` -> `i2s_deemph_coef.h`), magnitude
+      fitted minimax to the analog 50/15 us curve: 0.0037 / 0.0013 dB to
+      20 kHz at 44.1 / 48 kHz, 0.0043 dB to 14.4 kHz at 32 kHz, < 0.0001 dB
+      at 88.2 / 96 kHz; the phase deviation (15 / 12 degrees at 20 kHz) is
+      almost all a constant lead of 1.8 / 1.5 us. Gain <= 0 dB,
+      non-negative impulse response, DC gain one Q30 unit below 1. DF1,
+      Q30, 64-bit accumulation, 32-bit state, output rounded toward zero
+      (decays to exactly 0, no limit cycle); added error <= 0.004 LSB24
+      rms at 44.1 / 48 kHz; the clamp is unreachable for 24-bit input
+      (checked by the tool). With `SPDIF_TX_START_EMPHASIS` every format
+      goes through core 1 (one block of lag, fixed for the whole output,
+      so a flag change never moves the latency): the filter always runs
+      (warm), in place before `i2s_filter_run()` or the direct converter,
+      with the flag of each block in the mailbox; a change crossfades
+      linearly over one block. About 60 cycles per stereo frame (2 % of
+      core 1 at 44.1 / 48 kHz, 5.4 % at 88.2 kHz on 101.6 MHz), estimated
+      from the instruction count. The S/PDIF output stays untouched. USB
+      carries no emphasis flag.
+    - LEDs: RP2350-One WS2812 shows the source being heard: red while USB
+      audio plays (`LOCK_LED_*`), green while the S/PDIF input plays
+      without pre-emphasis (`LOCK_LED_INPUT_*`), yellow with it
+      (`LOCK_LED_EMPH_*`); off otherwise; the enumeration flashes stay red.
+      Pico 2: the onboard LED (GP25) is on while any source plays; the
+      external LOCK LED on `INPUT_LOCK_LED_PIN` (GP22, physical 29, GND on
+      28; active high, series resistor to GND) is on whenever either input
+      is locked, also while USB has priority; the EMPH LED on
+      `INPUT_EMPH_LED_PIN` (GP21, physical 27, the same GND) is on while
+      the input plays with pre-emphasis (the One's yellow), held like the
+      colour.
+    - Monitoring: session string tokens `src<u|c|t|->` (source heard),
+      `in<c|t|->/<c|-><t|->` (selected input, each input's lock),
+      `ir<rate><+-ppm>` or `ir-`, `cs<bits>[e][n]` or `cs-` (word length,
+      emphasis, non-PCM), `rx<locks>/<unlocks>/<parity>/<framing>/<overflows>`
+      (format in `tools/diag.py`); `monitor.py` reports lock / unlock,
+      selection, source changes, emphasis and non-PCM; UART log lines for
+      the same, and a 5-s `stat: in` line while the input plays.
+      `diag_mark(DIAG_MARK_SPDIF_RX)` precedes `spdif_rx_task()`.
+    - Status (RP2350-One, dual18 minimum phase): end to end with a
+      scratch-only test transmitter on the DEM pin read by the receiver as
+      its coax input, checked by the self-test decoders (S/PDIF output
+      bit-exact against the pattern, I2S bit-exact against the recomputed
+      de-emphasis + filter): 5 rates x -1000 / 0 / +1000 ppm in UAC2 and
+      UAC1, emphasis at all rates (flag in the output channel status, I2S
+      de-emphasized), emphasis toggles while playing, the direct I2S
+      format with and without emphasis, 16-bit and non-PCM input, dropouts
+      of 5..1000 ms, rate changes while playing, all USB arbitration cases
+      (pattern takes over; zeros never do; input back about 3.0 s after the
+      last audible USB sample, also with the stream still open), cycling
+      soaks (15 + 20 + 8 min, no events); the USB sweep stays ALL PASS. The
+      servo trim settles to the source offset minus the PLL error within a
+      few ppm. Timings: lock 18..29 ms, a stopped output plays the input
+      35..47 ms after the source starts, USB take-back 22..36 ms after the
+      stream opens, source off -> unlock 6..7 ms, output off at 3.0 s.
+      With a real source (owner's test): an Eversolo streamer on the
+      Toslink input through a 3.3 V receiver module locks and plays at
+      96 / 44.1 / 48 kHz (24 / 16 bit), rate changes relock within a
+      second, zero parity, framing and overflow errors, the Eversolo's
+      clock -102 ppm; the LED colours were set by eye (green and yellow
+      need far less green than red, `board_config.h`).
+      Found and fixed on the way: the receiver FIFO filled unread while
+      USB played (now emptied at the switch, `spdif_rx_flush()`; an unread
+      overflow is no discontinuity); a DMA ring lap now resyncs under the
+      hold instead of unlocking; non-PCM blocks never carry the emphasis
+      flag; the receiver and the self-test captures shared pio1 and
+      raced on CTRL from the two cores (receiver now on pio0, enables via
+      the atomic aliases); a false self-test PINHI when the output started
+      during an idle window.
+    - Known limitations: a rate change without a signal gap (44.1 <-> 48)
+      plays a few ms of new-rate frames at the old output rate before the
+      16 ms rate check unlocks, and counts a few hundred receiver errors;
+      the take-back drops the first audible USB chunk (up to 2 ms); the
+      silence tail after an emphasized input keeps the flag (harmless).
+    - Pending: a real coax receiver (margins at 96 kHz), dual16 with the
+      input (the DEM pin carried the test signal), the Pico 2 LOCK LED; a
+      self-test loopback (S/PDIF out wired to an input pin) and a self-test
+      transmitter setting the emphasis flag, as public features.
 
 ## Known TinyUSB issues (0.21.0)
 

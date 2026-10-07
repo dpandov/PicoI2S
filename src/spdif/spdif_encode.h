@@ -12,6 +12,7 @@
 //   W (subframe B)                          11100100
 #pragma once
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #define SPDIF_BLOCK_FRAMES   192
@@ -40,3 +41,8 @@ void spdif_encode_frames(spdif_encoder_t *enc, const int32_t *pcm,
 // Returns 0 on success, -1 for an unsupported rate or word length.
 int spdif_channel_status_build(uint8_t cs[SPDIF_CS_BYTES], uint32_t sample_rate,
                                uint8_t word_bits);
+
+// Sets or clears the 50/15 us pre-emphasis flag (byte 0 bits 3-5 = 100).
+static inline void spdif_channel_status_set_emphasis(uint8_t cs[SPDIF_CS_BYTES], bool on) {
+    cs[0] = (uint8_t)((cs[0] & ~0x38u) | (on ? 0x08u : 0u));
+}

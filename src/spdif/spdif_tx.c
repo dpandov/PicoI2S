@@ -72,6 +72,7 @@ static uint32_t tx_rate;
 static uint32_t tx_div;          // integer PIO divider at zero trim
 static int32_t tx_error_ppb;
 static uint8_t tx_bits;
+static volatile bool cs_emphasis;   // the flag in encoder.cs
 static volatile uint32_t generation;
 static volatile uint32_t late_irqs;
 static bool late_prev;          // the last interrupt was late
@@ -122,9 +123,14 @@ static bool __not_in_flash_func(fill_buffer)(uint b, bool live) {
     uint32_t base = b * BUFFER_WORDS;
     if (live && !chunk_clear(b, base))
         return false;
-    source_fn(pcm, SPDIF_TX_BUFFER_FRAMES);
+    uint32_t flags = source_fn(pcm, SPDIF_TX_BUFFER_FRAMES);
+    bool emphasis = (flags & SPDIF_TX_FLAG_EMPHASIS) != 0;
+    if (emphasis != cs_emphasis) {
+        spdif_channel_status_set_emphasis(encoder.cs, emphasis);
+        cs_emphasis = emphasis;
+    }
     if (companion)
-        companion->fill(b, pcm, SPDIF_TX_BUFFER_FRAMES, live);
+        companion->fill(b, pcm, SPDIF_TX_BUFFER_FRAMES, live, flags);
     // Pins the block position to the buffer, whatever was skipped before.
     encoder.frame = b * SPDIF_TX_BUFFER_FRAMES;
     for (uint32_t f = 0; f < SPDIF_TX_BUFFER_FRAMES; f += CHUNK_FRAMES) {
@@ -242,7 +248,7 @@ static void configure_dma(void) {
                           buffer_addr, dma_encode_transfer_count(1), false);
 }
 
-static bool tx_start(uint32_t sample_rate, uint8_t word_bits, spdif_source_fn source) {
+static bool tx_start(uint32_t sample_rate, uint8_t word_bits, spdif_source_fn source, uint32_t options) {
     if (running)
         tx_stop();
 
@@ -261,6 +267,7 @@ static bool tx_start(uint32_t sample_rate, uint8_t word_bits, spdif_source_fn so
     tx_bits = word_bits;
     buf_us = (SPDIF_TX_BUFFER_FRAMES * 1000000u + sample_rate / 2u) / sample_rate;
     spdif_encoder_init(&encoder, cs);
+    cs_emphasis = false;
 
     pio_sm_config c = spdif_tx_program_get_default_config(tx_offset);
     sm_config_set_out_pins(&c, tx_pin, 1);
@@ -270,7 +277,7 @@ static bool tx_start(uint32_t sample_rate, uint8_t word_bits, spdif_source_fn so
     pio_sm_init(tx_pio, tx_sm, tx_offset, &c);
     configure_dma();
 
-    if (companion && !companion->prepare(sample_rate)) {
+    if (companion && !companion->prepare(sample_rate, options)) {
         tx_rate = 0;
         tx_error_ppb = 0;
         tx_bits = 0;
@@ -358,15 +365,16 @@ static bool tx_set_word_bits(uint8_t word_bits) {
     // The encoder reads cs from the DMA interrupt. The block in flight goes
     // out with mixed old and new bits, which receivers tolerate.
     uint32_t irq = save_and_disable_interrupts();
+    spdif_channel_status_set_emphasis(cs, cs_emphasis);
     memcpy(encoder.cs, cs, sizeof(cs));
     tx_bits = word_bits;
     restore_interrupts(irq);
     return true;
 }
 
-bool spdif_tx_start(uint32_t sample_rate, uint8_t word_bits, spdif_source_fn source) {
+bool spdif_tx_start(uint32_t sample_rate, uint8_t word_bits, spdif_source_fn source, uint32_t options) {
     change_begin();
-    bool ok = tx_start(sample_rate, word_bits, source);
+    bool ok = tx_start(sample_rate, word_bits, source, options);
     change_end();
     return ok;
 }

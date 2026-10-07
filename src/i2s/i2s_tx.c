@@ -7,8 +7,10 @@
 // converted there into the buffer the DMA plays next; the other dual-line
 // filters copy the block to a mailbox for core 1, which filters and packs
 // it into the buffer after that (one block of lag; buffer 0 starts as
-// silence). Format table, timing selection, program generators and
-// converters are in i2s_format.h, the filters in i2s_filter.h.
+// silence). A source that may flag pre-emphasis (the S/PDIF input) sends
+// every format through core 1, de-emphasis first. Format table, timing
+// selection, program generators and converters are in i2s_format.h, the
+// filters in i2s_filter.h.
 
 #include "i2s/i2s_tx.h"
 
@@ -23,11 +25,11 @@
 #include "pico.h"
 
 #include "board_config.h"
+#include "i2s/i2s_deemph.h"
 #include "i2s/i2s_filter.h"
 #include "i2s/i2s_format.h"
 #include "spdif/spdif_trim.h"
 #include "spdif/spdif_tx.h"
-#include "usb/usb_audio.h"
 
 _Static_assert(I2S_DATA_R_PIN == I2S_DATA_PIN + 1, "out pins must be consecutive");
 _Static_assert(I2S_LRCK_PIN == I2S_BCLK_PIN + 1, "side-set pins must be consecutive");
@@ -97,7 +99,10 @@ static volatile bool active;        // prepared: blocks are accepted (fill, core
 
 // Current layout, read by the interrupt and core 1.
 static i2s_timing_t timing;
-static bool filtered;               // dual-line through core 1
+static bool trim_room;              // prepared for a trimmed rate (D >= 2)
+static bool via_core1;              // blocks go through core 1
+static bool filtered;               // dual-line filter on core 1
+static bool deemph_used;            // de-emphasis on core 1 (flag per block)
 static unsigned lag;                // buffers between a block's fill and its play
 static uint32_t words_per_buffer;
 static uint32_t ring_words;
@@ -111,6 +116,7 @@ static i2s_pack_tables_t pack_tables;
 // the block's frames and its target buffer, slot head % MAILBOX_SLOTS.
 static int32_t mailbox[MAILBOX_SLOTS][2u * IN_FRAMES];
 static uint8_t mailbox_target[MAILBOX_SLOTS];
+static bool mailbox_emphasis[MAILBOX_SLOTS];
 static volatile uint32_t mb_head;
 static volatile uint32_t mb_tail;
 static volatile bool core1_busy;
@@ -118,6 +124,7 @@ static volatile uint32_t late_irq;      // interrupt side: direct path skipped, 
 static volatile uint32_t late_core1;    // core 1: the DMA had reached the target
 
 // Core 1 only.
+static i2s_deemph_t deemph;
 static i2s_filter_t filter;
 static int32_t filter_out[2u * OUT_FRAMES_MAX];
 
@@ -161,36 +168,8 @@ static __force_inline unsigned live_target(unsigned b) {
     return target;
 }
 
-// Register access and inlined converters only: runs from RAM in the
-// S/PDIF DMA interrupt. The copy loop stays a loop (no memcpy from flash).
-static void __attribute__((optimize("no-tree-loop-distribute-patterns")))
-__not_in_flash_func(companion_fill)(unsigned b, const int32_t *pcm, uint32_t n_frames, bool live) {
-    if (!active)
-        return;
-    if (n_frames > IN_FRAMES)
-        n_frames = IN_FRAMES;
-    unsigned target = live ? live_target(b) : next_buffer++ & (BUFFERS - 1u);
-
-    if (filtered) {
-        if (mb_head - mb_tail >= MAILBOX_SLOTS) {
-            late_irq++;
-            return;
-        }
-        unsigned slot = mb_head & (MAILBOX_SLOTS - 1u);
-        int32_t *dst = mailbox[slot];
-        for (uint32_t i = 0; i < 2u * n_frames; i++)
-            dst[i] = pcm[i];
-        mailbox_target[slot] = (uint8_t)target;
-        __dmb();
-        mb_head++;
-        return;
-    }
-
-    if (live && !buffer_clear(target)) {
-        late_irq++;
-        return;
-    }
-    uint32_t *dst = &buffers[target * words_per_buffer];
+// Unfiltered block at the sample rate into an output buffer.
+static __force_inline void convert(uint32_t *dst, const int32_t *pcm, uint32_t n_frames) {
     switch (spec.conv) {
     case I2S_CONV_COPY:
         i2s_convert_copy(dst, pcm, n_frames);
@@ -202,6 +181,40 @@ __not_in_flash_func(companion_fill)(unsigned b, const int32_t *pcm, uint32_t n_f
         i2s_pack_dual(dst, pcm, n_frames, &timing, &spec, &pack_tables, false);
         break;
     }
+}
+
+// Register access and inlined converters only: runs from RAM in the
+// S/PDIF DMA interrupt. The copy loop stays a loop (no memcpy from flash).
+static void __attribute__((optimize("no-tree-loop-distribute-patterns")))
+__not_in_flash_func(companion_fill)(unsigned b, const int32_t *pcm, uint32_t n_frames, bool live,
+                                    uint32_t flags) {
+    if (!active)
+        return;
+    if (n_frames > IN_FRAMES)
+        n_frames = IN_FRAMES;
+    unsigned target = live ? live_target(b) : next_buffer++ & (BUFFERS - 1u);
+
+    if (via_core1) {
+        if (mb_head - mb_tail >= MAILBOX_SLOTS) {
+            late_irq++;
+            return;
+        }
+        unsigned slot = mb_head & (MAILBOX_SLOTS - 1u);
+        int32_t *dst = mailbox[slot];
+        for (uint32_t i = 0; i < 2u * n_frames; i++)
+            dst[i] = pcm[i];
+        mailbox_target[slot] = (uint8_t)target;
+        mailbox_emphasis[slot] = (flags & SPDIF_TX_FLAG_EMPHASIS) != 0;
+        __dmb();
+        mb_head++;
+        return;
+    }
+
+    if (live && !buffer_clear(target)) {
+        late_irq++;
+        return;
+    }
+    convert(&buffers[target * words_per_buffer], pcm, n_frames);
 }
 
 // Core 1. The busy flag and the re-check of `active` after raising it
@@ -219,18 +232,24 @@ void __not_in_flash_func(i2s_tx_core1_task)(void) {
     }
     unsigned slot = mb_tail & (MAILBOX_SLOTS - 1u);
     unsigned target = mailbox_target[slot];
-    i2s_filter_run(&filter, mailbox[slot], IN_FRAMES, filter_out);
-    __dmb();
-    mb_tail++;
+    int32_t *in = mailbox[slot];
+    if (deemph_used)
+        i2s_deemph_run(&deemph, in, in, IN_FRAMES, mailbox_emphasis[slot]);
+    if (filtered)
+        i2s_filter_run(&filter, in, IN_FRAMES, filter_out);
 
     // Checked after the filter, by when the DMA has settled past the
     // boundary the block was fetched at (see live_target()). The packer
-    // saturates the 1/16-scale output.
-    if (buffer_clear(target))
+    // saturates the filters' 1/16-scale output.
+    if (!buffer_clear(target))
+        late_core1++;
+    else if (filtered)
         i2s_pack_dual(&buffers[target * words_per_buffer], filter_out, IN_FRAMES * timing.osr,
                       &timing, &spec, &pack_tables, true);
     else
-        late_core1++;
+        convert(&buffers[target * words_per_buffer], in, IN_FRAMES);
+    __dmb();
+    mb_tail++;
     __dmb();
     core1_busy = false;
 }
@@ -293,13 +312,14 @@ static uint32_t spdif_divider(uint32_t sample_rate) {
     return (clock_get_hz(clk_sys) + cells / 2u) / cells;
 }
 
-static bool companion_prepare(uint32_t sample_rate) {
+static bool companion_prepare(uint32_t sample_rate, uint32_t options) {
     unload_programs();
     unsigned osr = i2s_oversampling(fmt, sample_rate, filter_type);
-    // In UAC1 mode the divider fraction carries the trim, so D >= 2.
-    bool trim_room = usb_audio_mode() == USB_AUDIO_MODE_UAC1;
-    if (!i2s_select_timing(spdif_divider(sample_rate), fmt, osr, trim_room, &timing))
+    // A trimmed output's divider fraction carries the trim, so D >= 2.
+    bool trimmed = (options & SPDIF_TX_START_TRIMMED) != 0;
+    if (!i2s_select_timing(spdif_divider(sample_rate), fmt, osr, trimmed, &timing))
         return false;
+    trim_room = trimmed;
     program.length = (uint8_t)i2s_program_build(program_instr, &timing, fmt);
     if (dem_used) {
         dem_program.length =
@@ -312,7 +332,9 @@ static bool companion_prepare(uint32_t sample_rate) {
 
     divider = timing.divider;
     filtered = i2s_format_is_dual(fmt) && filter_type != I2S_FILTER_NOS;
-    lag = filtered ? 1u : 0u;
+    deemph_used = (options & SPDIF_TX_START_EMPHASIS) != 0;
+    via_core1 = filtered || deemph_used;
+    lag = via_core1 ? 1u : 0u;
     words_per_buffer = i2s_words_per_frames(&timing, IN_FRAMES * osr);
     ring_words = BUFFERS * words_per_buffer;
     guard_words = GUARD_FRAMES * words_per_buffer / IN_FRAMES;
@@ -326,6 +348,8 @@ static bool companion_prepare(uint32_t sample_rate) {
     mb_tail = 0;
     if (filtered)
         i2s_filter_init(&filter, filter_type, sample_rate);
+    if (deemph_used)
+        i2s_deemph_init(&deemph, sample_rate, false);
 
     pio_sm_config c = pio_get_default_sm_config();
     sm_config_set_wrap(&c, offset, offset + program.length - 1u);
@@ -489,6 +513,10 @@ i2s_filter_type_t i2s_tx_filter(void) {
 
 bool i2s_tx_running(void) {
     return running;
+}
+
+bool i2s_tx_trimmed(void) {
+    return trim_room;
 }
 
 unsigned i2s_tx_oversampling(void) {

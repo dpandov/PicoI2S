@@ -16,7 +16,7 @@ static const int32_t __not_in_flash("test_tone") tone_24bit[48] = {
 };
 
 // Runs from the DMA interrupt; the table is in RAM for the same reason.
-void __not_in_flash_func(test_tone_source)(int32_t *pcm, uint32_t n_frames) {
+uint32_t __not_in_flash_func(test_tone_source)(int32_t *pcm, uint32_t n_frames) {
     static uint32_t phase;
     for (uint32_t i = 0; i < n_frames; i++) {
         int32_t s = (int32_t)((uint32_t)tone_24bit[phase] << 8);   // left-justify
@@ -26,4 +26,5 @@ void __not_in_flash_func(test_tone_source)(int32_t *pcm, uint32_t n_frames) {
             phase = 0;
         }
     }
+    return 0;
 }

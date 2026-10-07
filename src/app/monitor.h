@@ -7,10 +7,10 @@
 #include "i2s/i2s_tx.h"
 
 // Hidden USB string index of the session string (next to STRID_DIAG), read
-// by tools/monitor.py: "n<streams> fr<frames> sig<ms|-> up<ms>", all since
-// boot: stream starts, frames moved into the output ring (wraps at 2^32),
-// milliseconds since the last non-zero sample went out (- if none yet),
-// uptime.
+// by tools/monitor.py: USB stream starts, frames moved into the output ring
+// (wraps at 2^32), milliseconds since the last non-zero sample went out,
+// uptime, late I2S blocks, then the source heard and the S/PDIF receiver's
+// state and counters. Format in tools/diag.py.
 #define STRID_SESSION 0x23
 
 // Hidden USB string index of the configuration string, read by

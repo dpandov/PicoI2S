@@ -20,8 +20,9 @@ Output fields:
     rate/bits   current stream format
     ff<N>       receive FIFO level in bytes (depth 9312, held at 6 packets)
     ur<N>       underruns: output ring ran dry while playing
-    run0/1      stream samples going out on S/PDIF
-    led0/1      onboard LED state
+    run0/1      USB stream samples going out on S/PDIF (the S/PDIF input
+                playing shows in the session string: src)
+    led0/1      onboard LED state (any colour)
     tx<Hz>      S/PDIF output sample rate, 0 when the output is stopped
     ov<N>       overruns: USB packets that overwrote unread FIFO data
     lt<N>       S/PDIF interrupts too late to refill a buffer in time
@@ -46,12 +47,35 @@ Output fields:
     e.g. UAC2:  So 48000/24 ff4712 ur0 run1 led1 tx48000 ov0 lt0 rmin144 fmax5240 lp212 v0
          UAC1:  S1 44100/16 ff4935 ur0 run1 led1 tx44100 ov0 lt0 rmin144 fmax5400 lp212 tr361L v12
 
-A second hidden string (index 0x23, read by tools/monitor.py) carries the
-session counters since boot: "n<streams> fr<frames> sig<ms|-> up<ms> os<late>":
-stream starts, frames moved to the output (wraps at 2^32), milliseconds
-since the last non-zero sample went out (- if none yet), uptime, and I2S
-blocks that missed their DMA buffer (i2s_tx_late(); absent in older
-firmware).
+A second hidden string (index 0x23, read by tools/monitor.py and printed
+by this script after each reading) carries the session counters since boot
+and the S/PDIF input state, at most 123 characters:
+
+    n<streams> fr<frames> sig<ms|-> up<ms> os<late> src<u|c|t|->
+        in<c|t|->/<c|-><t|-> ir<rate><+|-><ppm>|ir- cs<bits>[e][n]|cs-
+        rx<locks>/<unlocks>/<parity>/<framing>/<overflows>
+
+    n           USB stream starts (open, or format change while open)
+    fr          frames moved to the output, from either source (wraps at 2^32)
+    sig         milliseconds since the last non-zero sample went out (- if
+                none yet)
+    up          uptime in milliseconds
+    os          I2S blocks that missed their DMA buffer (i2s_tx_late())
+    src         source heard: u USB, c coax input, t Toslink input, - none
+                (pre-roll, underrun, stall, output off)
+    in          S/PDIF input selected by the receiver (c, t, or - when
+                neither is locked), then each input's own lock: c / t, or -
+    ir          nominal rate of the selected input and its measured offset
+                in ppm, or ir- without a selected input
+    cs          channel status of the selected input: word length, e when
+                50/15 us pre-emphasis is flagged, n for non-PCM data (played
+                as zeros); cs- until a whole block has arrived
+    rx          receiver counters since boot: lock acquisitions, lock losses,
+                parity errors, preamble / framing errors, FIFO overflows
+
+    Counters from os on stop at 99999, ppm at +/-9999. Older firmware ends
+    after up (or os); the missing fields parse as None.
+    e.g. n3 fr91234567 sig12 up734002 os0 srcc inc/ct ir44100+12 cs24e rx3/1/0/2/0
 
 A third hidden string (index 0x24, printed by this script and by
 tools/monitor.py) carries the configuration, fixed at boot:
@@ -144,16 +168,49 @@ def parse_status(s):
     return d
 
 
+_SOURCES = {"u": "usb", "c": "coax", "t": "toslink", "-": "none"}
+_INPUTS = {"c": "coax", "t": "toslink", "-": "none"}
+
+
 def parse_session(s):
-    """Session string -> dict (streams, frames, signal_age_ms or None, up_ms,
-    i2s_late or None without the token)."""
-    m = re.fullmatch(r"n(\d+) fr(\d+) sig(\d+|-) up(\d+)( os(\d+))?", s.strip())
+    """Session string -> dict, or None if it is not one.
+
+    Keys: streams, frames, signal_age_ms (None: no signal yet), up_ms,
+    i2s_late; source ('usb', 'coax', 'toslink', 'none'), input (selected:
+    'coax', 'toslink', 'none'), locked ({'coax': bool, 'toslink': bool}),
+    input_rate (0 if none), input_ppm, cs ({'bits', 'emphasis', 'pcm'}, or
+    {} while unknown), rx ({'locks', 'unlocks', 'parity', 'framing',
+    'overflows'}). A key whose token the firmware does not send (older
+    versions) is None.
+    """
+    m = re.match(r"n(\d+) fr(\d+) sig(\d+|-) up(\d+)(?= |$)", s.strip())
     if not m:
         return None
-    return {"streams": int(m.group(1)), "frames": int(m.group(2)),
-            "signal_age_ms": None if m.group(3) == "-" else int(m.group(3)),
-            "up_ms": int(m.group(4)),
-            "i2s_late": int(m.group(6)) if m.group(6) is not None else None}
+    d = {"streams": int(m.group(1)), "frames": int(m.group(2)),
+         "signal_age_ms": None if m.group(3) == "-" else int(m.group(3)),
+         "up_ms": int(m.group(4)), "i2s_late": None, "source": None, "input": None,
+         "locked": None, "input_rate": None, "input_ppm": None, "cs": None, "rx": None}
+    for tok in s.split()[4:]:
+        if m := re.fullmatch(r"os(\d+)", tok):
+            d["i2s_late"] = int(m.group(1))
+        elif m := re.fullmatch(r"src([uct-])", tok):
+            d["source"] = _SOURCES[m.group(1)]
+        elif m := re.fullmatch(r"in([ct-])/([c-])([t-])", tok):
+            d["input"] = _INPUTS[m.group(1)]
+            d["locked"] = {"coax": m.group(2) == "c", "toslink": m.group(3) == "t"}
+        elif tok == "ir-":
+            d["input_rate"], d["input_ppm"] = 0, None
+        elif m := re.fullmatch(r"ir(\d+)([+-]\d+)", tok):
+            d["input_rate"], d["input_ppm"] = int(m.group(1)), int(m.group(2))
+        elif tok == "cs-":
+            d["cs"] = {}
+        elif m := re.fullmatch(r"cs(\d+)(e?)(n?)", tok):
+            d["cs"] = {"bits": int(m.group(1)), "emphasis": m.group(2) == "e",
+                       "pcm": m.group(3) != "n"}
+        elif m := re.fullmatch(r"rx(\d+)/(\d+)/(\d+)/(\d+)/(\d+)", tok):
+            d["rx"] = dict(zip(("locks", "unlocks", "parity", "framing", "overflows"),
+                               map(int, m.groups())))
+    return d
 
 
 def parse_config(s):
@@ -171,6 +228,9 @@ def main():
         print("config:", config)
     for i in range(count):
         print(time.strftime("%H:%M:%S"), read_diag(backend))
+        session = read_diag(backend, STRID_SESSION)
+        if parse_session(session):
+            print("         session:", session)
         if i + 1 < count:
             time.sleep(1)
 

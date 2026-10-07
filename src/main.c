@@ -13,6 +13,7 @@
 #include "clock/audio_clock.h"
 #include "diag/diag.h"
 #include "i2s/i2s_tx.h"
+#include "spdif/spdif_rx.h"
 #include "spdif/spdif_tx.h"
 #include "usb/usb_audio.h"
 #if USB2SPDIF_SELFTEST
@@ -77,13 +78,16 @@ int main(void) {
     status_led_init();
     spdif_tx_init(SPDIF_PIN);
     i2s_tx_init(i2s_format, i2s_filter);
+#if !USB2SPDIF_TEST_TONE
+    spdif_rx_init(SPDIF_IN_COAX_PIN, SPDIF_IN_TOSLINK_PIN);
+#endif
 #if USB2SPDIF_SELFTEST
     selftest_init();
 #endif
     multicore_launch_core1(core1_main);
 
 #if USB2SPDIF_TEST_TONE
-    spdif_tx_start(TEST_TONE_SAMPLE_RATE, 24, test_tone_source);
+    spdif_tx_start(TEST_TONE_SAMPLE_RATE, 24, test_tone_source, 0);
 #else
     audio_pipeline_init();
 #endif
@@ -100,17 +104,19 @@ int main(void) {
         diag_mark(DIAG_MARK_TUD_TASK);
         tud_task();
 #if USB2SPDIF_TEST_TONE
-        bool playing = false;
+        audio_pipeline_source_t source = {0};
 #else
+        diag_mark(DIAG_MARK_SPDIF_RX);
+        spdif_rx_task();
         diag_mark(DIAG_MARK_PIPELINE);
         audio_pipeline_task();
-        bool playing = audio_pipeline_playing();
+        audio_pipeline_source_t source;
+        audio_pipeline_get_source(&source);
 #endif
 
         uint32_t ev = usb_audio_take_events();
-        bool stream_open = usb_audio_link_state() == USB_AUDIO_STREAMING;
         diag_mark(DIAG_MARK_LED);
-        status_led_task(ev, stream_open, playing);
+        status_led_task(ev, &source);
         diag_mark(DIAG_MARK_LOG);
         monitor_task(ev);
         log_task();

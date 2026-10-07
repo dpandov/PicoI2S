@@ -24,7 +24,6 @@
 #include "selftest/selftest_i2s_expect.h"
 #include "selftest/selftest_report.h"
 #include "selftest_capture.pio.h"
-#include "usb/usb_audio.h"
 
 _Static_assert(SPDIF_CS_BYTES == SELFTEST_CS_BYTES, "channel status size");
 _Static_assert(I2S_DATA_R_PIN == I2S_DATA_PIN + 1 && I2S_LRCK_PIN == I2S_BCLK_PIN + 1,
@@ -292,10 +291,11 @@ static bool capture_init(capture_t *c, const pio_program_t *prog, default_config
 }
 
 // Starts capturing n_words at clk_sys / div; the capture is given up after
-// timeout_us.
+// timeout_us. The enable bit is set and cleared atomically: the receiver
+// (spdif/spdif_rx.c) may share the PIO block from core 0.
 static void __not_in_flash_func(capture_start)(capture_t *c, uint32_t div, uint32_t n_words,
                                                uint32_t timeout_us) {
-    pio_sm_set_enabled(c->pio, c->sm, false);
+    hw_clear_bits(&c->pio->ctrl, 1u << c->sm);
     pio_sm_set_clkdiv_int_frac8(c->pio, c->sm, (uint16_t)div, 0);
     pio_sm_clear_fifos(c->pio, c->sm);
     pio_sm_restart(c->pio, c->sm);
@@ -306,7 +306,7 @@ static void __not_in_flash_func(capture_start)(capture_t *c, uint32_t div, uint3
     dma_channel_set_trans_count(c->dma, n_words, true);
     c->t0 = time_us_32();
     c->timeout_us = timeout_us;
-    pio_sm_set_enabled(c->pio, c->sm, true);
+    hw_set_bits(&c->pio->ctrl, 1u << c->sm);
 }
 
 // 0 while the capture runs, 1 when it completed, -1 on timeout (measured
@@ -316,11 +316,11 @@ static int __not_in_flash_func(capture_poll)(capture_t *c) {
         if (time_us_32() - c->t0 <= c->timeout_us) {
             return 0;
         }
-        pio_sm_set_enabled(c->pio, c->sm, false);
+        hw_clear_bits(&c->pio->ctrl, 1u << c->sm);
         dma_channel_abort(c->dma);
         return -1;
     }
-    pio_sm_set_enabled(c->pio, c->sm, false);
+    hw_clear_bits(&c->pio->ctrl, 1u << c->sm);
     return 1;
 }
 
@@ -369,8 +369,7 @@ static uint32_t ceil_div(uint32_t a, uint32_t b) {
 // Frame layout of the running I2S output from the generator's timing.
 static bool i2s_layout(selftest_i2s_layout_t *lay, i2s_format_t f, uint32_t dtx, unsigned osr) {
     i2s_timing_t t;
-    bool trim_room = usb_audio_mode() == USB_AUDIO_MODE_UAC1;
-    if (!i2s_select_timing(dtx, f, osr, trim_room, &t)) {
+    if (!i2s_select_timing(dtx, f, osr, i2s_tx_trimmed(), &t)) {
         return false;
     }
     lay->sample_bits = I2S_SAMPLE_BITS;
@@ -634,6 +633,13 @@ static void spdif_done(void) {
     }
     if (!w.rate) {
         uint8_t lvl = i2s_pin_levels();
+        // The output may have started during the decode.
+        __dmb();
+        if (spdif_tx_generation() != w.g_tx || tx_rate_now() != 0u) {
+            selftest_i2s_report_skipped(&rep.i2s);
+            finish_window(0);
+            return;
+        }
         selftest_i2s_report_state(&rep.i2s, lvl ? SELFTEST_PINHI : SELFTEST_IDLE, 0, 0, lvl);
         finish_window(IDLE_PAUSE_US);
         return;

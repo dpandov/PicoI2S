@@ -102,6 +102,10 @@ i2s_filter_type_t i2s_tx_filter(void);
 // True between the S/PDIF start and stop that carried this output along.
 bool i2s_tx_running(void);
 
+// The output was started for a trimmed rate (spdif_tx_start()), so its
+// timing has D >= 2 (i2s_select_timing()).
+bool i2s_tx_trimmed(void);
+
 // Output frames per input frame of the running output: 8 or 4 for the
 // oversampling filters, 1 otherwise (NOS, sinc) and when stopped.
 unsigned i2s_tx_oversampling(void);

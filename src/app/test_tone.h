@@ -7,4 +7,4 @@
 #define TEST_TONE_SAMPLE_RATE 48000u
 
 // S/PDIF source callback (see spdif_tx.h).
-void test_tone_source(int32_t *pcm, uint32_t n_frames);
+uint32_t test_tone_source(int32_t *pcm, uint32_t n_frames);

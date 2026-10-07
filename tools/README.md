@@ -12,6 +12,7 @@ root.
 | [`diag.py`](#diagpy) | Reads the diagnostic string: crash record and live status | any (libusb) |
 | [`i2s_filter_plot.py`](#i2s_filter_plotpy) | Plots the dual-line filters: frequency, impulse, step response | any |
 | [`i2s_filter_design.py`](#i2s_filter_designpy) | Designs the filters and writes their coefficient header | any |
+| [`i2s_deemph_design.py`](#i2s_deemph_designpy) | Designs the 50/15 us de-emphasis and writes its coefficient header | any |
 | `wasapi_play.c` | Native WASAPI exclusive-mode pattern player, built by `selftest.py` | Windows |
 
 ## Setup
@@ -28,8 +29,8 @@ Python installation. What each tool needs:
   Windows; `numpy` and `aplay` / `amixer` (alsa-utils) on Linux.
 - `stream_test.py`: those plus `sounddevice`, `numpy`.
 - `i2s_filter_plot.py`: `numpy`, `matplotlib`.
-- `i2s_filter_design.py`: `numpy`, `scipy` (not in the requirements file,
-  only needed to change the filters).
+- `i2s_filter_design.py`, `i2s_deemph_design.py`: `numpy`, `scipy` (not in
+  the requirements file, only needed to change the filters).
 
 The USB tools read hidden string descriptors through the firmware's picotool
 reset interface, which Windows binds to WinUSB automatically (Windows 8.1
@@ -247,13 +248,31 @@ Events:
 - overrun and late-interrupt counts;
 - late I2S blocks (the session string's `os` token: blocks that missed the
   I2S output, normally from the filter path on core 1; 0 in normal
-  operation).
+  operation);
+- S/PDIF input: lock and loss of lock per input (coax, Toslink), the
+  input the receiver selects with its rate and offset, playing and
+  stopped playing (lost lock, discontinuity or no samples), USB taking the
+  output back or the input taking it after 3 s of USB idle, pre-emphasis
+  on and off, non-PCM data (played as silence), and increases of the
+  receiver's parity, framing and overflow counters. Firmware without the
+  input tokens reports none of these.
+
+```
+17:02:11 coax input locked and selected: 44100 Hz, +12 ppm
+17:02:14 S/PDIF output on: 44100 Hz
+17:02:14 playing: coax input, 44100 Hz, +12 ppm, 16-bit
+17:02:40 input pre-emphasis on (50/15 us)
+17:03:05 stream opened: 48000 Hz / 16-bit (1.536 Mbit/s), volume 0 dB
+17:03:07 playing
+17:03:07 S/PDIF output switched to 48000 Hz
+17:03:07 USB took the output back from the coax input after 53.0 s
+```
 
 | Option | Meaning |
 |---|---|
 | `--interval S` | poll period (default 0.25 s); events shorter than this are not seen |
 | `--silence S` | all-zero samples for this long count as digital silence (default 0.5 s) |
-| `--status S` | status line every S seconds while a stream is open: format, data rate, the sample rate measured from the device's frame counter against the PC clock (over 30 s, to about 100 ppm; the USB read timing limits it), FIFO level, ring minimum, main-loop time, trim, current silence |
+| `--status S` | status line every S seconds while a stream is open: format, data rate, the sample rate measured from the device's frame counter against the PC clock (over 30 s, to about 100 ppm; the USB read timing limits it), FIFO level, ring minimum, main-loop time, trim, current silence. While the S/PDIF input plays: the input, its rate and offset, word length, emphasis, current silence |
 | `--log FILE` | append every line to a file |
 
 Ctrl+C prints a summary (stream starts, time streaming).
@@ -286,8 +305,8 @@ UAC1:  b1 none | S1 44100/16 ff4935 ur0 run1 led1 tx44100 ov0 lt0 rmin144 fmax54
 | rate/bits | current stream format |
 | `ff<N>` | receive FIFO level in bytes (depth 9312, held at 6 packets) |
 | `ur<N>` | underruns: output ring ran dry while playing |
-| `run0/1` | stream samples going out on S/PDIF |
-| `led0/1` | status LED state |
+| `run0/1` | USB stream samples going out on S/PDIF (the S/PDIF input playing shows as `src` in the session string) |
+| `led0/1` | status LED state (any colour) |
 | `tx<Hz>` | S/PDIF output sample rate, 0 when stopped |
 | `ov<N>` | overruns: USB packets that overwrote unread FIFO data |
 | `lt<N>` | S/PDIF interrupts too late to refill a buffer |
@@ -302,11 +321,33 @@ stream (open or format change); `fmax` and `lp` from when it began
 playing, so the start-up is excluded. Counters stop at 999999 (9999 in
 UAC1 mode).
 
-The session string (0x23, read by `monitor.py`) carries counters since
-boot: `n<streams> fr<frames> sig<ms|-> up<ms> os<late>`. These are the
-stream starts, frames moved to the output (wraps at 2^32), milliseconds
-since the last non-zero sample went out (`-` if none yet), the uptime, and
-I2S blocks that missed their DMA buffer.
+The session string (0x23, read by `monitor.py` and printed by `diag.py`
+after each reading) carries counters since boot and the S/PDIF input
+state, at most 123 characters:
+
+```
+n<streams> fr<frames> sig<ms|-> up<ms> os<late> src<u|c|t|-> in<c|t|->/<c|-><t|->
+    ir<rate><+|-><ppm>|ir- cs<bits>[e][n]|cs- rx<locks>/<unlocks>/<parity>/<framing>/<overflows>
+
+e.g. n3 fr91234567 sig12 up734002 os0 srcc inc/ct ir44100+12 cs24e rx3/1/0/2/0
+```
+
+| Token | Meaning |
+|---|---|
+| `n<N>` | USB stream starts (open, or format change while open) |
+| `fr<N>` | frames moved to the output, from either source (wraps at 2^32) |
+| `sig<ms>` | milliseconds since the last non-zero sample went out (`-` if none yet) |
+| `up<ms>` | uptime |
+| `os<N>` | I2S blocks that missed their DMA buffer |
+| `src` | source heard: `u` USB, `c` coax input, `t` Toslink input, `-` none (pre-roll, underrun, stall, output off) |
+| `in` | input the receiver selects (`c`, `t`, `-` when neither is locked), then each input's own lock (`c` / `t`, or `-`) |
+| `ir` | nominal rate of the selected input and its measured offset in ppm; `ir-` without one |
+| `cs` | its channel status: word length, `e` for 50/15 us pre-emphasis, `n` for non-PCM data (played as silence); `cs-` until a whole block has arrived |
+| `rx` | receiver counters: lock acquisitions, lock losses, parity errors, preamble / framing errors, FIFO overflows |
+
+Counters from `os` on stop at 99999, the offset at +/-9999 ppm. Older
+firmware ends after `up` (or `os`); the tools treat the missing tokens as
+not reported.
 
 The configuration string (0x24, printed by `diag.py` before its readings
 and by `monitor.py` on connect) is fixed at boot:
@@ -378,3 +419,29 @@ filters' first image excepted) and a gain bound below 8, which the 1/16
 input scaling in `src/i2s/i2s_filter.h` relies on. The filters and stage
 layouts are described at the top of the script and in the main README
 (Filters).
+
+## i2s_deemph_design.py
+
+Designs the de-emphasis for sources flagged with 50/15 us pre-emphasis,
+checks it and writes `src/i2s/i2s_deemph_coef.h`. The header is committed,
+and a rerun rewrites it identically. Run it only to change the design.
+
+```
+python -m pip install numpy scipy
+python tools/i2s_deemph_design.py
+```
+
+One biquad per sample rate (32, 44.1, 48, 88.2, 96 kHz), its magnitude
+fitted minimax in dB to the analogue curve (1 + s 15 us) / (1 + s 50 us)
+over 20 Hz .. 20 kHz (0.45 Fs at 32 kHz), with the gain held at or below
+0 dB. The coefficients are Q30 for the direct form I in
+`src/i2s/i2s_deemph.h`. The tool prints per rate the magnitude error, the
+phase deviation (raw, and after removing the constant lead of a few us,
+which is a pure time shift), the peak and DC gain, the poles, and the
+output margin. It stops without writing the header when a check fails on
+the quantised coefficients: magnitude error above 0.01 dB, gain above
+0 dB, a pole outside the unit circle or not real, a negative impulse
+response, feedback coefficients summing to 1 or more (needed for the
+state to decay to exactly zero), a possible accumulator overflow, or a DC
+margin too small for the rounding error (24-bit input must never reach the
+output clamp).

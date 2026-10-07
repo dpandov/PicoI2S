@@ -8,6 +8,7 @@
 #include "app/status_led.h"
 #include "diag/diag.h"
 #include "i2s/i2s_tx.h"
+#include "spdif/spdif_rx.h"
 #include "spdif/spdif_tx.h"
 #include "usb/usb_audio.h"
 #include "usb/usb_descriptors.h"
@@ -33,6 +34,45 @@ static void log_events(uint32_t ev) {
     if (ev & USB_AUDIO_EVT_RATE_CHANGED) log_format("usb: rate");
     if (ev & USB_AUDIO_EVT_STREAM_START) log_format("usb: stream start");
     if (ev & USB_AUDIO_EVT_STREAM_STOP)  log_printf("usb: stream stop\n");
+}
+
+static const char *input_name(spdif_rx_input_t input) {
+    return input == SPDIF_RX_COAX ? "coax" : (input == SPDIF_RX_TOSLINK ? "toslink" : "none");
+}
+
+static void receiver_stats(spdif_rx_stats_t *st) {
+#if USB2SPDIF_TEST_TONE
+    *st = (spdif_rx_stats_t){0};
+#else
+    spdif_rx_get_stats(st);
+#endif
+}
+
+// Receiver changes: lock per input, the selected input and its rate,
+// channel-status flags.
+static void log_input(void) {
+    static spdif_rx_status_t prev;
+    audio_pipeline_source_t src;
+    audio_pipeline_get_source(&src);
+    const spdif_rx_status_t *st = &src.input;
+    if (st->locked_coax != prev.locked_coax)
+        log_printf("input: coax %s\n", st->locked_coax ? "locked" : "unlocked");
+    if (st->locked_toslink != prev.locked_toslink)
+        log_printf("input: toslink %s\n", st->locked_toslink ? "locked" : "unlocked");
+    if (st->input != prev.input || st->sample_rate != prev.sample_rate) {
+        if (st->input == SPDIF_RX_NONE)
+            log_printf("input: none selected\n");
+        else
+            log_printf("input: %s selected, %lu Hz %ld ppm\n", input_name(st->input),
+                       (unsigned long)st->sample_rate, (long)st->rate_ppm);
+    }
+    bool emphasis = st->cs_valid && st->emphasis;
+    if (emphasis != (prev.cs_valid && prev.emphasis))
+        log_printf("input: pre-emphasis %s\n", emphasis ? "on" : "off");
+    bool data = st->cs_valid && !st->pcm;
+    if (data != (prev.cs_valid && !prev.pcm))
+        log_printf("input: %s\n", data ? "non-PCM, muted" : "PCM");
+    prev = *st;
 }
 
 // Keeps the status line within its 95 characters.
@@ -115,22 +155,51 @@ static void log_stats(void) {
                    (unsigned long)log_dropped(), (long)ps.trim_ppb,
                    ps.clock_locked ? " locked" : "");
     }
+    audio_pipeline_source_t src;
+    audio_pipeline_get_source(&src);
+    if (src.heard == AUDIO_SOURCE_COAX || src.heard == AUDIO_SOURCE_TOSLINK) {
+        audio_pipeline_stats_t ps;
+        audio_pipeline_get_stats(&ps);
+        spdif_rx_stats_t rs;
+        receiver_stats(&rs);
+        log_printf("stat: in %s %lu Hz %ld ppm lvl %lu/%lu ur %lu lt %lu rmin %lu lp %lu "
+                   "par %lu frm %lu ovf %lu trim %ld%s\n",
+                   input_name(src.input.input), (unsigned long)src.input.sample_rate,
+                   (long)src.input.rate_ppm, (unsigned long)spdif_rx_level(),
+                   (unsigned long)spdif_rx_depth(), (unsigned long)ps.underruns,
+                   (unsigned long)ps.late_irqs, (unsigned long)ps.ring_min,
+                   (unsigned long)ps.loop_max_us, (unsigned long)rs.err_parity,
+                   (unsigned long)rs.err_frame, (unsigned long)rs.overflows,
+                   (long)ps.trim_ppb, ps.clock_locked ? " locked" : "");
+    }
     last_us = now;
     last_rx = st.rx_bytes;
 }
 
 void monitor_task(uint32_t events) {
     log_events(events);
+    log_input();
     update_diag_status();
     log_stats();
 }
 
 // Format documented in tools/diag.py: "n<streams> fr<frames> sig<ms|-> up<ms>
-// os<late>", at most 64 characters.
+// os<late> src<u|c|t|-> in<c|t|->/<c|-><t|-> ir<rate><+|-><ppm>|ir-
+// cs<bits>[e][n]|cs- rx<locks>/<unlocks>/<parity>/<frame>/<overflows>", at
+// most 123 characters (counters from os on capped at 99999, ppm at 9999).
 const char *monitor_session_string(void) {
-    static char buf[80];
+    static char buf[128];
+    static const char source_chr[] = {'-', 'u', 'c', 't'};
+    static const char input_chr[] = {'-', 'c', 't'};
     audio_pipeline_session_t s;
     audio_pipeline_get_session(&s);
+    audio_pipeline_source_t src;
+    audio_pipeline_get_source(&src);
+    const spdif_rx_status_t *in = &src.input;
+    spdif_rx_stats_t rs;
+    receiver_stats(&rs);
+    const uint32_t max = 99999u;
+
     int n = snprintf(buf, sizeof(buf), "n%lu fr%lu sig", (unsigned long)s.streams,
                      (unsigned long)s.frames);
     if (n > 0 && (size_t)n < sizeof(buf)) {
@@ -141,8 +210,35 @@ const char *monitor_session_string(void) {
         }
     }
     if (n > 0 && (size_t)n < sizeof(buf)) {
-        snprintf(buf + n, sizeof(buf) - (size_t)n, " up%lu os%lu",
-                 (unsigned long)(time_us_64() / 1000u), (unsigned long)i2s_tx_late());
+        n += snprintf(buf + n, sizeof(buf) - (size_t)n, " up%lu os%lu src%c in%c/%c%c",
+                      (unsigned long)(time_us_64() / 1000u), clamp_cnt(i2s_tx_late(), max),
+                      source_chr[src.heard], input_chr[in->input],
+                      in->locked_coax ? 'c' : '-', in->locked_toslink ? 't' : '-');
+    }
+    if (n > 0 && (size_t)n < sizeof(buf)) {
+        if (in->input != SPDIF_RX_NONE && in->sample_rate != 0) {
+            int32_t ppm = in->rate_ppm;
+            ppm = ppm > 9999 ? 9999 : (ppm < -9999 ? -9999 : ppm);
+            n += snprintf(buf + n, sizeof(buf) - (size_t)n, " ir%lu%c%ld",
+                          (unsigned long)in->sample_rate, ppm < 0 ? '-' : '+',
+                          (long)(ppm < 0 ? -ppm : ppm));
+        } else {
+            n += snprintf(buf + n, sizeof(buf) - (size_t)n, " ir-");
+        }
+    }
+    if (n > 0 && (size_t)n < sizeof(buf)) {
+        if (in->input != SPDIF_RX_NONE && in->cs_valid) {
+            n += snprintf(buf + n, sizeof(buf) - (size_t)n, " cs%u%s%s", in->word_bits,
+                          in->emphasis ? "e" : "", in->pcm ? "" : "n");
+        } else {
+            n += snprintf(buf + n, sizeof(buf) - (size_t)n, " cs-");
+        }
+    }
+    if (n > 0 && (size_t)n < sizeof(buf)) {
+        snprintf(buf + n, sizeof(buf) - (size_t)n, " rx%lu/%lu/%lu/%lu/%lu",
+                 clamp_cnt(rs.locks, max), clamp_cnt(rs.unlocks, max),
+                 clamp_cnt(rs.err_parity, max), clamp_cnt(rs.err_frame, max),
+                 clamp_cnt(rs.overflows, max));
     }
     return buf;
 }

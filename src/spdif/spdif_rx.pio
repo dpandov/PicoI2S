@@ -1,0 +1,71 @@
+; S/PDIF biphase-mark decoder: one 32-bit word per subframe.
+; Configure: IN base and JMP pin = the input, shift right with autopush at
+; 32, joined RX FIFO, 8 state-machine cycles per cell (clk_sys / (1024 x
+; Fs)). Start at `hunt_high` or `hunt_low` with an empty ISR.
+;
+; Every time slot starts with an edge; a 1 adds a mid-slot edge. The loop
+; waits for each slot-start edge, records the level just after it, and
+; reads the level again 1.4 cells later (past any mid-slot edge) to know
+; which way the next edge goes. Bit k = NOT (level after edge k XOR level
+; after edge k + 1). The 29th edge (slots 4..31, then the next subframe's
+; first) opens the preamble: cells 0..2 at one level, an edge at cell 3,
+; cells 4..6 recorded as they are, cell 7 again tells the direction of
+; the slot-4 edge.
+;
+; Word, bit 0 first: preamble cells 4, 5, 6; levels after the edges of
+; slots 4..31; level after the next preamble's first edge.
+;
+; Timing in cycles after an edge (`wait` sees it up to one cycle late; one
+; cell = 8): level read at 11..12, next wait from 12..13; preamble cells
+; read at 11, 19, 27 and 35 after the cell-3 edge.
+
+.program spdif_rx
+
+.define SLOT_DELAY 7        ; edge -> direction read: 4 + SLOT_DELAY cycles
+.define CELL_DELAY 10       ; cell-3 edge -> cell 4: CELL_DELAY + 1 cycles
+
+decide:
+    jmp pin fall
+.wrap_target
+rise:
+    wait 1 pin 0 [1]
+common:
+    in pins, 1 [SLOT_DELAY]
+    jmp y-- decide
+    jmp pin pre_fall            ; the next subframe started: cells 0..2
+pre_rise:
+    wait 1 pin 0 [CELL_DELAY - 1]
+    jmp cells
+fall:
+    wait 0 pin 0
+    jmp common
+pre_fall:
+    wait 0 pin 0 [CELL_DELAY]
+cells:
+    in pins, 1 [7]              ; cell 4
+    in pins, 1 [7]              ; cell 5
+    in pins, 1 [6]              ; cell 6
+    set y, 28
+    jmp pin fall                ; cell 7
+.wrap
+
+; A run unchanged at 1.4 and 2.4 cells after its first edge (11 and 19
+; cycles, as in the loop) is three cells long. Every preamble of a stream
+; starts with such a run at the same level; B and M hold another one at
+; the other level (cells 5..7, 3..5), so the hunt looks at one level only.
+public hunt_high:
+    wait 0 pin 0
+    wait 1 pin 0 [10]
+    jmp pin hunt_high_2 [7]
+    jmp hunt_high
+hunt_high_2:
+    jmp pin pre_fall
+    jmp hunt_high
+public hunt_low:
+    wait 1 pin 0
+    wait 0 pin 0 [10]
+    jmp pin hunt_low [7]
+    jmp pin hunt_low
+    jmp pre_rise
+
+
