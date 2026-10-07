@@ -1,11 +1,16 @@
-"""usb2spdif self-test: bit-exact check of the S/PDIF and I2S outputs (Windows).
+"""usb2spdif self-test: bit-exact check of the S/PDIF and I2S outputs
+(Windows, Linux).
 
 Needs firmware built with -DUSB2SPDIF_SELFTEST=ON. The Pico then decodes
 its own S/PDIF pin and its I2S / dual-line pins on core 1 and reports the
 results as USB strings 0x21 and 0x22; no receiver, probe or UART is needed.
-This script plays a test pattern with a native WASAPI exclusive-mode player
-(tools/wasapi_play.c, built on first use with the ziglang package into
-tools/build/) and reads the reports.
+This script plays a test pattern and reads the reports. Windows: a native
+WASAPI exclusive-mode player (tools/wasapi_play.c, built on first use with
+the ziglang package into tools/build/). Linux: aplay (alsa-utils) on the
+bridge's ALSA hw device, fed by this script; hw has no format conversion
+and no software volume, so it is bit-exact (stop PipeWire / PulseAudio
+from holding the card first). Reading the strings needs access to the
+USB device (udev rule, see tools/README.md).
 
     pip install -r tools/requirements.txt
     python tools/selftest.py                     sweep: 5 rates x 16/24 bit, 3-s stop
@@ -120,6 +125,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 
 try:
@@ -228,6 +234,121 @@ class Player:
         if self.proc.poll() is None:
             self.proc.kill()
         self.proc.communicate()
+
+
+# Linux: the bridge's ALSA card and aplay.
+
+TRAILING_SILENCE = 0.2  # s of zeros after the pattern, so the stream ends cleanly
+BRIDGE_NAMES = ("USB to S/PDIF", "USB to SPDIF")
+
+
+def alsa_card(device=None):
+    """Index of the first ALSA card whose /proc/asound/cards line contains
+    `device` (default: the bridge's name in either mode), or None."""
+    names = (device,) if device else BRIDGE_NAMES
+    try:
+        with open("/proc/asound/cards") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        m = re.match(r"^\s*(\d+) \[", line)
+        if m and any(n in line for n in names):
+            return int(m.group(1))
+    return None
+
+
+def alsa_volume_max(card):
+    """Sets every playback control of the card to its maximum (0 dB) and
+    unmutes it: the device applies its Feature Unit volume itself. Warns
+    and returns False on failure."""
+    try:
+        r = subprocess.run(["amixer", "-c", str(card), "scontrols"], capture_output=True,
+                           text=True, timeout=10)
+        controls = re.findall(r"^Simple mixer control '(.*)',(\d+)$", r.stdout, re.M)
+        for name, idx in controls:
+            subprocess.run(["amixer", "-q", "-c", str(card), "sset", f"{name},{idx}", "100%",
+                            "unmute"], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError) as e:
+        print(f"warning: could not set the device volume to 0 dB: {e}")
+        return False
+    if not controls:
+        print("warning: no mixer control found on the card")
+        return False
+    print(f"volume: {', '.join(n for n, _ in controls)} set to 0 dB, unmuted")
+    return True
+
+
+def pattern_bytes(start, n, bits):
+    """n frames of the self-test pattern (src/selftest/selftest_pattern.h)
+    from frame `start`, interleaved little-endian as the stream carries
+    them: int16 at 16 bits, 24 bits in the top of 32-bit containers."""
+    import numpy as np
+    k = np.arange(start, start + n, dtype=np.uint64)
+    out = np.empty((n, 2), dtype=np.uint32)
+    if bits == 16:
+        left = (k * 0x5A37) & 0xFFFF
+        out[:, 0] = left
+        out[:, 1] = ~left & 0xFFFF
+        return out.astype("<u2").tobytes()
+    left = (k * 0x0B5A37) & 0xFFFFFF
+    out[:, 0] = left << 8
+    out[:, 1] = (~left & 0xFFFFFF) << 8
+    return out.astype("<u4").tobytes()
+
+
+class AlsaPlayer:
+    """aplay on hw:<card>,0 in the background: pattern for `seconds`, then
+    a little silence. Same interface as Player."""
+
+    def __init__(self, card, rate, bits, seconds):
+        fmt = "S16_LE" if bits == 16 else "S32_LE"
+        cmd = ["aplay", "-q", "-D", f"hw:{card},0", "-t", "raw", "-f", fmt, "-r", str(rate),
+               "-c", "2"]
+        self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.PIPE)
+        self.stop = False
+        self.thread = threading.Thread(target=self._feed, args=(rate, bits, seconds),
+                                       daemon=True)
+        self.thread.start()
+
+    def _feed(self, rate, bits, seconds):
+        total = int(seconds * rate + 0.5)
+        chunk = max(rate // 20, 1)
+        sent = 0
+        try:
+            while sent < total and not self.stop:
+                n = min(chunk, total - sent)
+                self.proc.stdin.write(pattern_bytes(sent, n, bits))
+                sent += n
+            sample_bytes = 2 if bits == 16 else 4
+            self.proc.stdin.write(bytes(int(TRAILING_SILENCE * rate) * 2 * sample_bytes))
+            self.proc.stdin.close()
+        except (BrokenPipeError, OSError, ValueError):
+            pass
+
+    def wait(self):
+        """Exit code and error text (empty on success)."""
+        self.thread.join()
+        err = self.proc.stderr.read()
+        self.proc.wait()
+        return self.proc.returncode, err.decode(errors="replace").strip()
+
+    def kill(self):
+        self.stop = True
+        if self.proc.poll() is None:
+            self.proc.kill()
+        self.thread.join()
+        self.proc.stderr.read()
+        self.proc.wait()
+
+
+def make_player(exe, rate, bits, seconds, device=None):
+    """The platform's player; exe is the WASAPI player on Windows, the ALSA
+    card index on Linux."""
+    if sys.platform == "win32":
+        return Player(exe, rate, bits, seconds, device)
+    return AlsaPlayer(exe, rate, bits, seconds)
 
 
 #--------------------------------------------------------------------------
@@ -490,7 +611,7 @@ def wait_until(t0, at):
 
 def play_item(rd, exe, device, rate, bits, boots, i2s_fmt, i2s_filter=None):
     """(S/PDIF failures, I2S failures, last read)."""
-    player = Player(exe, rate, bits, PLAY_SECONDS, device)
+    player = make_player(exe, rate, bits, PLAY_SECONDS, device)
     t0 = time.time()
     reads = []
     for at in SAMPLE_AT:
@@ -609,7 +730,7 @@ def run_soak(rd, exe, args, boots, i2s_fmt, i2s_filter=None):
     flt = f" {i2s_filter}" if i2s_filter and i2s_fmt.startswith("dual") else ""
     print(f"soak: {rate} Hz {bits}-bit, I2S {i2s_fmt}{flt}, for {args.soak:g} min, reading every "
           f"{args.interval:g} s")
-    player = Player(exe, rate, bits, SOAK_WARMUP + seconds + SOAK_MARGIN, args.device)
+    player = make_player(exe, rate, bits, SOAK_WARMUP + seconds + SOAK_MARGIN, args.device)
     t0 = time.time()
     events = []
 
@@ -772,13 +893,18 @@ def main():
     if not st["pattern"]:
         sys.exit(0 if run_tone(rd, boots, i2s_fmt, i2s_filter) else 1)
 
-    if sys.platform != "win32":
-        sys.exit("the pattern player needs Windows (WASAPI)")
-    try:
-        exe = build_player()
-    except PlayerBuildError as e:
-        sys.exit(str(e))
-    set_volume_max(exe, args.device)
+    if sys.platform == "win32":
+        try:
+            exe = build_player()
+        except PlayerBuildError as e:
+            sys.exit(str(e))
+        set_volume_max(exe, args.device)
+    else:
+        exe = alsa_card(args.device)
+        if exe is None:
+            sys.exit("no ALSA card with the bridge's name (/proc/asound/cards)")
+        print(f"alsa:   card {exe} (hw:{exe},0)")
+        alsa_volume_max(exe)
     if args.soak:
         ok = run_soak(rd, exe, args, boots, i2s_fmt, i2s_filter)
     else:

@@ -568,7 +568,11 @@ Known limitations:
   which Windows rejects. The device recognises Apple hosts by their
   enumeration order and serves them a matching configuration. macOS is
   untested.
-- Linux is untested.
+- Linux: verified in both modes on a Raspberry Pi 5 (Debian 13, plain
+  ALSA): bit-exact at all formats, soaks clean. ALSA sets a newly
+  connected card to -20 dB; for bit-perfect playback set the bridge's
+  `PCM` control to 0 dB (`amixer -c <card> sset PCM 100% unmute`) and
+  keep it with `sudo alsactl store`.
 - In UAC2 mode the 44.1 and 48 kHz settings run the RP2350 at 152.4 /
   153.6 MHz, 1.6 / 2.4 % above its 150 MHz rating (see Clocking).
 - The USB IDs 1209:0001 (UAC2) and 1209:0002 (UAC1) are pid.codes test

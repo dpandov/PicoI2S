@@ -6,7 +6,7 @@ root.
 
 | Tool | Purpose | Host |
 |---|---|---|
-| [`selftest.py`](#selftestpy) | Bit-exact check of the S/PDIF and I2S outputs (self-test firmware) | Windows |
+| [`selftest.py`](#selftestpy) | Bit-exact check of the S/PDIF and I2S outputs (self-test firmware) | Windows, Linux |
 | [`stream_test.py`](#stream_testpy) | Plays a tone at every format and checks the device's view of the stream | Windows |
 | [`monitor.py`](#monitorpy) | Live event log: sessions, formats, silence, counters | any (libusb) |
 | [`diag.py`](#diagpy) | Reads the diagnostic string: crash record and live status | any (libusb) |
@@ -24,7 +24,8 @@ python -m pip install -r tools/requirements.txt
 Python installation. What each tool needs:
 
 - `diag.py`, `monitor.py`: `pyusb`, `libusb-package`.
-- `selftest.py`: those plus `ziglang` (compiler for `wasapi_play.c`).
+- `selftest.py`: those plus `ziglang` (compiler for `wasapi_play.c`) on
+  Windows; `numpy` and `aplay` / `amixer` (alsa-utils) on Linux.
 - `stream_test.py`: those plus `sounddevice`, `numpy`.
 - `i2s_filter_plot.py`: `numpy`, `matplotlib`.
 - `i2s_filter_design.py`: `numpy`, `scipy` (not in the requirements file,
@@ -37,6 +38,15 @@ or later); no audio driver is involved. They find the device in both modes
 diagnostic string. Run the Windows test tools in a local session: over
 Remote Desktop, Windows redirects audio and the bridge's playback endpoint
 is not available.
+
+On Linux, libusb needs access to the device; a udev rule gives it to every
+user (then replug the bridge):
+
+```
+echo 'SUBSYSTEM=="usb", ATTR{idVendor}=="1209", ATTR{idProduct}=="000[12]", MODE="0666"' |
+    sudo tee /etc/udev/rules.d/60-usb2spdif.rules
+sudo udevadm control --reload-rules
+```
 
 The Windows test tools play in WASAPI exclusive mode, in which Windows still
 applies the device's own volume control (Feature Unit). They first set the
@@ -51,9 +61,15 @@ Bit-exact check of the S/PDIF and I2S / dual-line outputs, with no
 receiver, DAC, probe or UART. Needs firmware built with
 `-DUSB2SPDIF_SELFTEST=ON` (see Self-test in the main README): the bridge
 decodes its own output pins on core 1 and serves the results as USB strings
-0x21 (S/PDIF) and 0x22 (I2S). The script plays a test pattern with
-`wasapi_play.c` (built on first use into `tools/build/`; PortAudio's
-exclusive mode is not bit-exact) and reads the reports.
+0x21 (S/PDIF) and 0x22 (I2S). The script plays a test pattern and reads
+the reports. Windows: `wasapi_play.c` (built on first use into
+`tools/build/`; PortAudio's exclusive mode is not bit-exact). Linux:
+`aplay` on the bridge's ALSA `hw` device (found by name in
+`/proc/asound/cards`), fed by the script: `hw` has no format conversion
+and no software volume, so it is bit-exact. Nothing else may hold the card
+(stop PipeWire / PulseAudio for the test). The script first sets the
+card's `PCM` control to 0 dB and unmutes it with `amixer`, since ALSA sets
+a new card to -20 dB.
 
 ```
 python tools/selftest.py                        sweep: 5 rates x 16/24 bit, 3-s stop
@@ -72,7 +88,7 @@ python tools/selftest.py --i2s-filter slow      require this dual-line filter (j
 | `--soak MINUTES` | play one format continuously and log every glitch |
 | `--rate HZ`, `--bits 16\|24` | soak format (default 48000 / 24; 16 in UAC1 mode) |
 | `--interval S` | soak read interval (default 5 s) |
-| `--device NAME` | playback device name part (default: the bridge in either mode) |
+| `--device NAME` | playback device name part (Windows endpoint, Linux card; default: the bridge in either mode) |
 | `--i2s-format FMT` | expected I2S format: i2s, lj, rj24, rj16, dual16, dual18, dual20, dual24 (default: what the device reports) |
 | `--i2s-filter NAME` | expected dual-line filter: sharp, slow, minphase, sinc, nos (default: what the device reports) |
 | `--status` | print the diagnostic, S/PDIF and I2S reports once and exit |

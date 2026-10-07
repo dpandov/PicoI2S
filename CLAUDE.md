@@ -123,7 +123,16 @@ generated analysis go in `scratch/` at the repository root. This folder and
 1. Toolchain install, CMake skeleton, blink, UART logging. (done)
 2. UAC2 descriptors from the TinyUSB `uac2_speaker_fb` example. Goal: device
    enumerates on Windows and Linux with the right rates and formats. (done on
-   Windows; Linux not yet tested)
+   Windows and Linux: Raspberry Pi 5, Debian 13, kernel 6.12, plain ALSA:
+   the selftest sweep ALL PASS, 9-min soaks at 44.1/16 and 96/24 with zero
+   events, 120 rapid open/close and format switches, 5 re-enumerations,
+   the Feature Unit as ALSA `PCM` -64..0 dB in 1 dB steps plus mute, exact
+   on the device. ALSA's default init sets a new card to -20 dB:
+   bit-perfect playback needs `PCM` at 0 dB (`alsactl store` keeps it).
+   UAC1 mode likewise: adaptive endpoint, 3 rates, sweep ALL PASS, 9-min
+   soak at 44.1/16 with zero events and the trim steady at +192 ppm (the
+   Pi's USB clock -151 ppm against the crystal, plus the -344 ppm PLL
+   error), 90 rapid open/close and rate changes)
 3. Phase A: S/PDIF transmitter module (`src/spdif/`), brought up with the
    test tone at 48 kHz. Verify lock on the receiver. (done)
    - BMC encoding on the CPU (table lookup, line-level tracking; preambles
@@ -200,7 +209,8 @@ generated analysis go in `scratch/` at the repository root. This folder and
      Stress: rapid format changes, open/close loops, replug, host
      sleep/resume, host CPU load.
    - Hosts: Android (functional: plays, lock, LED, 3-s stop; Eversolo T8
-     played 2 h clean on the phase-4 firmware). Linux and macOS later.
+     played 2 h clean on the phase-4 firmware). Linux (step 2, both
+     modes): verified. macOS later.
 7. UAC1 mode selected by a configuration pin at boot. Target: TVs and old
    Windows (PCM2704-style compatibility). (done and verified on Windows 11
    in both modes and on iPad / iPhone (UAC2 Apple feedback path); long
