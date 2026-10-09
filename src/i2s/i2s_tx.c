@@ -39,7 +39,7 @@ _Static_assert(I2S_FILTER_MAX_IN == SPDIF_TX_BUFFER_FRAMES, "the filter works in
 #define CLOCK_PINS 2u
 #define PIN_MASK   ((((1ull << DATA_PINS) - 1u) << I2S_DATA_PIN) | \
                     (((1ull << CLOCK_PINS) - 1u) << I2S_BCLK_PIN))
-#define DEM_MASK   (1ull << I2S_DEM_PIN)
+#define CLOCK_MASK   (1ull << I2S_CLOCK_PIN)
 
 #define BUFFERS          4u
 #define IN_FRAMES        SPDIF_TX_BUFFER_FRAMES
@@ -58,8 +58,9 @@ static i2s_filter_type_t filter_type;   // NOS for the direct formats
 static i2s_format_spec_t spec;      // RAM copy of the format table entry
 static PIO pio;
 static uint sm;
-static uint dem_sm;
-static bool dem_used;               // dual16: the DEM state machine runs
+static uint clk_sm;
+static bool clk_used;               // the clock state machine runs: MCLK (direct) or DEM (dual16)
+static bool clk_dithered;           // DEM: on the I2S divider, trimmed with it; MCLK runs at clk_sys
 static uint dma_data;
 static uint dma_ctrl;
 static uint32_t dma_mask;
@@ -79,20 +80,20 @@ static pio_program_t program = {
                         (1u << (I2S_LRCK_PIN / 16)),
 #endif
 };
-static uint16_t dem_instr[I2S_DEM_PROGRAM_MAX];
-static pio_program_t dem_program = {
-    .instructions = dem_instr,
+static uint16_t clk_instr[I2S_CLOCK_PROGRAM_MAX];
+static pio_program_t clk_program = {
+    .instructions = clk_instr,
     .length = 0,
     .origin = -1,
     .pio_version = 0,
 #if PICO_PIO_VERSION > 0
-    .used_gpio_ranges = 1u << (I2S_DEM_PIN / 16),
+    .used_gpio_ranges = 1u << (I2S_CLOCK_PIN / 16),
 #endif
 };
 static bool loaded;
-static bool dem_loaded;
+static bool clk_loaded;
 static uint offset;
-static uint dem_offset;
+static uint clk_offset;
 
 static volatile bool running;       // between arm() and stop()
 static volatile bool active;        // prepared: blocks are accepted (fill, core 1)
@@ -131,9 +132,7 @@ static int32_t filter_out[2u * OUT_FRAMES_MAX];
 // Main loop only.
 static uint32_t divider;
 static spdif_trim_t trim;
-static spdif_trim_t dem_trim;
 static uint32_t trim_reg;
-static uint32_t dem_trim_reg;
 
 // Next word the data channel reads, as an index into buffers[].
 static __force_inline uint32_t dma_position(void) {
@@ -259,9 +258,9 @@ static void unload_programs(void) {
         pio_remove_program(pio, &program, offset);
         loaded = false;
     }
-    if (dem_loaded) {
-        pio_remove_program(pio, &dem_program, dem_offset);
-        dem_loaded = false;
+    if (clk_loaded) {
+        pio_remove_program(pio, &clk_program, clk_offset);
+        clk_loaded = false;
     }
 }
 
@@ -271,15 +270,15 @@ static bool load_programs(void) {
         return false;
     offset = (uint)off;
     loaded = true;
-    if (!dem_used)
+    if (!clk_used)
         return true;
-    off = pio_add_program(pio, &dem_program);
+    off = pio_add_program(pio, &clk_program);
     if (off < 0) {
         unload_programs();
         return false;
     }
-    dem_offset = (uint)off;
-    dem_loaded = true;
+    clk_offset = (uint)off;
+    clk_loaded = true;
     return true;
 }
 
@@ -321,10 +320,11 @@ static bool companion_prepare(uint32_t sample_rate, uint32_t options) {
         return false;
     trim_room = trimmed;
     program.length = (uint8_t)i2s_program_build(program_instr, &timing, fmt);
-    if (dem_used) {
-        dem_program.length =
-            (uint8_t)i2s_dem_program_build(dem_instr, i2s_dem_period(&timing, sample_rate));
-        if (dem_program.length == 0)
+    if (clk_used) {
+        clk_program.length = (uint8_t)(
+            clk_dithered ? i2s_clock_program_build(clk_instr, i2s_dem_period(&timing, fmt, sample_rate))
+                         : i2s_mclk_program_build(clk_instr, timing.divider, I2S_BCLK_PIN));
+        if (clk_program.length == 0)
             return false;
     }
     if (!load_programs())
@@ -362,27 +362,25 @@ static bool companion_prepare(uint32_t sample_rate, uint32_t options) {
     pio_sm_init(pio, sm, offset, &c);
     // The loop count of the first group; the pins stay low until enabled.
     pio_sm_exec(pio, sm, pio_encode_set(pio_x, timing.x_preload));
-    if (dem_used) {
+    if (clk_used) {
         c = pio_get_default_sm_config();
-        sm_config_set_wrap(&c, dem_offset, dem_offset + dem_program.length - 1u);
-        sm_config_set_set_pins(&c, I2S_DEM_PIN, 1);
-        sm_config_set_clkdiv_int_frac8(&c, timing.divider, 0);
-        pio_sm_init(pio, dem_sm, dem_offset, &c);
+        sm_config_set_wrap(&c, clk_offset, clk_offset + clk_program.length - 1u);
+        sm_config_set_set_pins(&c, I2S_CLOCK_PIN, 1);
+        sm_config_set_clkdiv_int_frac8(&c, clk_dithered ? timing.divider : 1u, 0);
+        pio_sm_init(pio, clk_sm, clk_offset, &c);
     }
     configure_dma();
 
     uint32_t now = timer_hw->timerawl;
     spdif_trim_reset(&trim, divider, now);
-    spdif_trim_reset(&dem_trim, divider, now);
     trim_reg = spdif_trim_clkdiv_reg(trim.applied);
-    dem_trim_reg = trim_reg;
     __dmb();
     active = true;
     return true;
 }
 
 static uint32_t sm_mask(void) {
-    return (1u << sm) | (dem_used ? 1u << dem_sm : 0u);
+    return (1u << sm) | (clk_used ? 1u << clk_sm : 0u);
 }
 
 // The control channel loads buffer 0 and starts the data channel, which
@@ -416,10 +414,10 @@ static void companion_stop(void) {
     pio_sm_clear_fifos(pio, sm);
     pio_sm_restart(pio, sm);
     pio_sm_set_pins_with_mask64(pio, sm, 0, PIN_MASK);
-    if (dem_used) {
-        pio_sm_clear_fifos(pio, dem_sm);
-        pio_sm_restart(pio, dem_sm);
-        pio_sm_set_pins_with_mask64(pio, dem_sm, 0, DEM_MASK);
+    if (clk_used) {
+        pio_sm_clear_fifos(pio, clk_sm);
+        pio_sm_restart(pio, clk_sm);
+        pio_sm_set_pins_with_mask64(pio, clk_sm, 0, CLOCK_MASK);
     }
     unload_programs();
 }
@@ -433,28 +431,23 @@ static void companion_set_trim_ppb(int32_t ppb) {
         target = 1u << 24;
     uint32_t now = timer_hw->timerawl;
     spdif_trim_set_target(&trim, target, now);
-    if (dem_used)
-        spdif_trim_set_target(&dem_trim, target, now);
 }
 
 // Writing CLKDIV while running does not restart the divider, so the bit
-// phase stays continuous. Each state machine dithers on its own.
-static void dither_sm(spdif_trim_t *t, uint32_t *reg, uint which) {
-    if (t->applied == t->target)
-        return;
-    uint32_t r = spdif_trim_clkdiv_reg(spdif_trim_dither(t, timer_hw->timerawl));
-    if (r != *reg) {
-        *reg = r;
-        pio->sm[which].clkdiv = r;
-    }
-}
-
+// phase stays continuous. The DEM state machine takes the same value in
+// the same step (dithered on its own it drifts away by the sawtooth; even
+// written back to back it still wanders slowly, which DEM does not mind).
+// MCLK follows BCLK itself and needs no divider writes.
 static void companion_trim_task(void) {
-    if (!running)
+    if (!running || trim.applied == trim.target)
         return;
-    dither_sm(&trim, &trim_reg, sm);
-    if (dem_used)
-        dither_sm(&dem_trim, &dem_trim_reg, dem_sm);
+    uint32_t r = spdif_trim_clkdiv_reg(spdif_trim_dither(&trim, timer_hw->timerawl));
+    if (r != trim_reg) {
+        trim_reg = r;
+        pio->sm[sm].clkdiv = r;
+        if (clk_dithered)
+            pio->sm[clk_sm].clkdiv = r;
+    }
 }
 
 static const spdif_tx_companion_t companion = {
@@ -471,10 +464,11 @@ void i2s_tx_init(i2s_format_t format, i2s_filter_type_t filter_sel) {
     filter_type = i2s_format_is_dual(fmt) ? i2s_filter_from_code(filter_sel) : I2S_FILTER_NOS;
     spec = i2s_format_table[fmt];
     i2s_pack_tables_init(&pack_tables, spec.bits);
-    dem_used = fmt == I2S_FORMAT_DUAL_16;
+    clk_used = fmt == I2S_FORMAT_DUAL_16 || !i2s_format_is_dual(fmt);
+    clk_dithered = fmt == I2S_FORMAT_DUAL_16;
     pio = spdif_tx_pio();
     sm = (uint)pio_claim_unused_sm(pio, true);
-    dem_sm = (uint)pio_claim_unused_sm(pio, true);
+    clk_sm = (uint)pio_claim_unused_sm(pio, true);
     dma_data = (uint)dma_claim_unused_channel(true);
     dma_ctrl = (uint)dma_claim_unused_channel(true);
     dma_mask = (1u << dma_data) | (1u << dma_ctrl);
@@ -488,16 +482,19 @@ void i2s_tx_init(i2s_format_t format, i2s_filter_type_t filter_sel) {
         if (PIN_MASK & (1ull << p))
             pio_gpio_init(pio, p);
     }
-    // Sharp edges on BCLK (up to 9.6 MHz); LATCH / LRCK and DEM are slow.
+    // Sharp edges on BCLK (up to 9.6 MHz) and MCLK (up to 24.6 MHz); LATCH /
+    // LRCK and DEM are slow.
     gpio_set_slew_rate(I2S_BCLK_PIN, GPIO_SLEW_RATE_FAST);
-    if (dem_used) {
-        pio_sm_set_pins_with_mask64(pio, dem_sm, 0, DEM_MASK);
-        pio_sm_set_consecutive_pindirs(pio, dem_sm, I2S_DEM_PIN, 1, true);
-        pio_gpio_init(pio, I2S_DEM_PIN);
+    if (clk_used) {
+        pio_sm_set_pins_with_mask64(pio, clk_sm, 0, CLOCK_MASK);
+        pio_sm_set_consecutive_pindirs(pio, clk_sm, I2S_CLOCK_PIN, 1, true);
+        pio_gpio_init(pio, I2S_CLOCK_PIN);
+        if (!i2s_format_is_dual(fmt))
+            gpio_set_slew_rate(I2S_CLOCK_PIN, GPIO_SLEW_RATE_FAST);
     } else {
-        gpio_init(I2S_DEM_PIN);
-        gpio_put(I2S_DEM_PIN, false);
-        gpio_set_dir(I2S_DEM_PIN, GPIO_OUT);
+        gpio_init(I2S_CLOCK_PIN);
+        gpio_put(I2S_CLOCK_PIN, false);
+        gpio_set_dir(I2S_CLOCK_PIN, GPIO_OUT);
     }
 
     spdif_tx_set_companion(&companion);

@@ -73,8 +73,11 @@ pair of classic multibit DACs) with the same samples at the same time. The
 I2S state machine sits on the same PIO block as the S/PDIF one, is started
 in the same write and consumes one frame per the same number of
 system-clock cycles, so the two outputs stay sample-aligned and follow the
-UAC1 clock trim together. There is no MCLK. Clocks and data are low while
-nothing plays (the outputs stop 3 s after the audio).
+UAC1 clock trim together. In the I2S, left- and right-justified formats
+a 256 Fs MCLK comes out on a fifth pin for DACs that need one (PCM179x,
+AK439x, CS43xx types); DACs with their own PLL (PCM5102, ES9023) ignore
+it. Clocks and data are low while nothing plays (the outputs stop 3 s
+after the audio).
 
 | Signal | RP2350-One | Pico 2 | Note |
 |---|---|---|---|
@@ -82,7 +85,7 @@ nothing plays (the outputs stop 3 s after the audio).
 | DR | GP15 | GP17 (pin 22) | dual-line modes only |
 | BCLK | GP26 | GP18 (pin 24) | |
 | LRCK (LATCH in the dual-line modes) | GP27 | GP19 (pin 25) | |
-| DEM | GP28 | GP20 (pin 26) | TDA1541A DEM clock, dual-line 16 only; low otherwise |
+| MCLK / DEM | GP28 | GP20 (pin 26) | 256 Fs MCLK in the I2S / LJ / RJ formats; TDA1541A DEM clock in dual-line 16; low in the other dual-line formats |
 | GND | top of the same row | pins 23, 28 | |
 
 On the RP2350-One the five signals sit in the row that starts with 5V, GND
@@ -118,7 +121,17 @@ and 8), select the filter of the dual-line formats (see
 The remaining codes (GP2 grounded together with GP3 or GP4) are reserved
 and select the sharp filter. I2S, left- and right-justified are never
 filtered: they always run at the sample rate (64 BCLK per frame, two
-32-bit slots, LRCK = Fs), whatever the filter jumpers say.
+32-bit slots, LRCK = Fs), whatever the filter jumpers say, with MCLK =
+256 Fs (11.29 / 12.29 MHz at 44.1 / 48 kHz, 8.19 MHz at 32 kHz, 22.57 /
+24.57 MHz at 88.2 / 96 kHz; DACs that need a double-speed setting at
+88.2 / 96 kHz must be set up for it). MCLK is a 50 % square wave from a
+third PIO state machine that restarts its pattern on every BCLK edge, so
+it stays locked to BCLK and LRCK under the clock trim too, rising a fixed
+20 ns after each BCLK edge. It needs a system clock whose S/PDIF divider
+is a multiple of 4, so these formats run the same clocks as UAC1 mode
+(147.43 / 135.43 MHz, -186 / -344 ppm) in UAC2 mode too; the host follows
+the feedback, so only the absolute pitch carries that error (under a
+thousandth of a semitone).
 
 On the RP2350-One all seven jumper pins, GP2 to GP8, are in the GP0..GP13
 row, on the side opposite the I2S pins (GP2 is its third pin, GP8 its
@@ -207,14 +220,16 @@ compensation the slot counts stay and the output word rate is the sample
 rate, so BCLK is 8 or 4 times lower (dual-line 16: 16 x Fs).
 
 Limitations: the filters and the DEM clock exist for the dual-line formats
-only. In UAC1 mode the clock trim that follows the host's rate is a
-fractional PIO divider, dithered: the I2S clocks carry a phase error of up
-to one system-clock cycle (about 7 ns) as a slow sawtooth. Asynchronous
-DACs (ESS type) do not care; a synchronous DAC sees it as low-level
-jitter. UAC2 mode has none of it. The 44.1 and 48 kHz settings run the
-chip at 152.4 / 153.6 MHz, 1.6 / 2.4 % above its 150 MHz rating, to give
-the filters their cycles without a larger clock error (see Clocking
-below).
+only, MCLK for the direct formats only. In UAC1 mode and with the S/PDIF
+input the clock trim that follows the source's rate is a fractional PIO
+divider, dithered between adjacent steps every 25 us: the I2S clocks,
+MCLK included, carry a sawtooth phase error of about 35 ns peak to peak
+at 44.1 / 48 kHz (65 ns at 88.2 / 96 kHz) at 40 kHz, above the audio
+band. Asynchronous DACs (ESS type) do not care; a synchronous DAC sees it
+as low-level jitter. UAC2 USB playback has none of it. The 44.1 and 48 kHz settings
+of the dual-line formats run the chip at 152.4 / 153.6 MHz, 1.6 / 2.4 %
+above its 150 MHz rating, to give the filters their cycles without a
+larger clock error (see Clocking below).
 
 ### Raspberry Pi Pico 2
 
@@ -324,7 +339,10 @@ USB host --iso OUT--> TinyUSB FIFO --main loop--> PCM ring --DMA IRQ: BMC encode
   152.4 and 153.6 MHz are 1.6 and 2.4 % above the RP2350's 150 MHz
   rating. UAC1 mode runs 147.43 / 135.43 MHz for the 48k / 44.1k
   families instead (-186 / -344 ppm): its clock servo cancels the error
-  anyway, and the higher clock gives the trim a finer step.
+  anyway, and the higher clock gives the trim a finer step. The I2S, LJ
+  and RJ output formats use those clocks in UAC2 mode as well: their
+  256 Fs MCLK needs a PIO divider that is a multiple of 4, which no more
+  accurate in-spec setting offers with a 50 % duty cycle.
 
 - **S/PDIF**: the CPU biphase-mark encodes each frame (preamble, 24-bit
   sample, V/U/C/P bits) into 128 line cells with a table lookup; a PIO state

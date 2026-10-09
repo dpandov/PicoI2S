@@ -7,7 +7,6 @@
 // state machines are enabled in one write and consume one input frame per
 // the same number of clk_sys cycles, so the two outputs carry the same
 // samples and stop together. The trim (UAC1 mode) is applied to both.
-// There is no MCLK.
 //
 // I2S, left- and right-justified go out at the sample rate, converted in
 // the interrupt. The dual-line formats (multibit DACs) take one of five
@@ -17,11 +16,15 @@
 // FIR that flattens the DAC's sin(x)/x hold droop, at -4 dB); NOS passes
 // the samples through at the sample rate. All but NOS run on core 1, so
 // that output lags S/PDIF by one block plus the filter's group delay; NOS
-// is converted in the interrupt like the single-line formats. In dual16
-// (TDA1541A) a third state machine drives the DEM clock on I2S_DEM_PIN: a
-// 50 % square wave at the oversampled word rate (8x Fs below 50 kHz, 4x
-// above) with every filter, NOS included, phase-locked to LATCH; the pin
-// is low in every other format.
+// is converted in the interrupt like the single-line formats. A third
+// state machine drives I2S_CLOCK_PIN: in the direct formats a 256 Fs MCLK
+// (which needs the even S/PDIF dividers of the fast clock table), run at
+// clk_sys and restarted on every BCLK edge read back from the pad, so it
+// stays locked to BCLK under the trim; in dual16 (TDA1541A) the DEM
+// clock, a 50 % square wave at the oversampled word rate (8x Fs below
+// 50 kHz, 4x above) with every filter, NOS included, on the I2S state
+// machine's divider and trim. The pin is low in the other dual-line
+// formats.
 //
 // Timing (i2s_format.h): an output frame is F BCLK slots of N state
 // machine cycles at divider D, with F x N x D = 128 x div / osr clk_sys
@@ -85,7 +88,7 @@ static inline const char *i2s_filter_name(i2s_filter_type_t type) {
     return (unsigned)type < I2S_FILTER_COUNT ? names[type] : "?";
 }
 
-// Claims the I2S and DEM state machines on spdif_tx_pio() and two DMA
+// Claims the I2S and clock state machines on spdif_tx_pio() and two DMA
 // channels, drives all output pins low, and registers itself as the
 // S/PDIF transmitter's companion. filter: from the filter jumpers, used by
 // the dual-line formats only. Call once, after spdif_tx_init() and before

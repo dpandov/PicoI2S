@@ -11,8 +11,9 @@
 // S/PDIF data to the Toslink transmitter input.
 // I2S / dual-line output (i2s/i2s_tx.h): DATA (DL in the dual-line modes)
 // and DR are consecutive PIO out pins; BCLK and LRCK (LATCH in the
-// dual-line modes) are consecutive side-set pins; DEM is the TDA1541 DEM
-// clock (dual-line 16 only, low otherwise).
+// dual-line modes) are consecutive side-set pins; CLOCK carries the
+// 256 Fs MCLK in the I2S / LJ / RJ formats and the TDA1541 DEM clock in
+// dual-line 16 (low in the other dual-line formats).
 #if USB2SPDIF_BOARD_RP2350_ONE
 // S/PDIF at the end of the GP0..GP13 row (the short side of the board);
 // I2S in the row next to 3V3: GP28, 27, 26, 15, 14 in order.
@@ -21,7 +22,7 @@
 #define I2S_DATA_R_PIN 15
 #define I2S_BCLK_PIN   26
 #define I2S_LRCK_PIN   27
-#define I2S_DEM_PIN    28
+#define I2S_CLOCK_PIN  28
 #else
 // Pico 2: S/PDIF on physical pin 34 (GND on 33, 3V3 on 36); I2S on 21,
 // 22, 24, 25, 26 (GND on 23 and 28).
@@ -30,7 +31,7 @@
 #define I2S_DATA_R_PIN 17
 #define I2S_BCLK_PIN   18
 #define I2S_LRCK_PIN   19
-#define I2S_DEM_PIN    20
+#define I2S_CLOCK_PIN  20
 #endif
 
 // S/PDIF inputs (spdif/spdif_rx.h), played when USB is not available: a

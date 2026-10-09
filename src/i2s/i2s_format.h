@@ -37,7 +37,7 @@
 // direct groups, 4 for the two dual-line ones. 16 holds N <= 32 (direct)
 // and N <= 64 (dual-line).
 #define I2S_PROGRAM_MAX       16u
-#define I2S_DEM_PROGRAM_MAX    8u
+#define I2S_CLOCK_PROGRAM_MAX 10u
 
 typedef enum {
     I2S_CONV_COPY,      // 32-bit words as they are
@@ -141,9 +141,12 @@ static inline unsigned i2s_program_length(const i2s_format_spec_t *s, unsigned n
 // dividing C_out = 128 x spdif_div / osr such that C_out / F = N x D with
 // N >= 4 and D >= 1 (trim_room: D >= 2, so the divider fraction can carry
 // the UAC1 trim); the smallest N (largest D) for that F. The direct
-// formats need F = 64 exactly. False if no such split exists (C_out not a
-// multiple of osr, no F up to the maximum, D over 255 or a program over
-// I2S_PROGRAM_MAX).
+// formats need F = 64 exactly, N a multiple of 8 and D >= 2, so that the
+// clock state machine can make the 256 Fs MCLK (i2s_mclk_program_build():
+// 2 D cycles per period, even for 50 %), which needs a spdif_div that is a
+// multiple of 4 (clock/audio_clock.h). False if no such split exists
+// (C_out not a multiple of osr, no F up to the maximum, D over 255 or a
+// program over I2S_PROGRAM_MAX).
 static inline bool i2s_select_timing(uint32_t spdif_div, i2s_format_t f, unsigned osr,
                                      bool trim_room, i2s_timing_t *t) {
     if (f >= I2S_FORMAT_COUNT || spdif_div == 0 || osr == 0 || (128u * spdif_div) % osr != 0)
@@ -151,14 +154,16 @@ static inline bool i2s_select_timing(uint32_t spdif_div, i2s_format_t f, unsigne
     const i2s_format_spec_t *s = &i2s_format_table[f];
     bool dual = s->conv == I2S_CONV_DUAL;
     uint32_t c_out = 128u * spdif_div / osr;
-    unsigned d_min = trim_room ? 2u : 1u;
+    // MCLK (direct): D >= 2 for its 2 D period, 3 with trim room so that the
+    // wait has a cycle of slack for the BCLK halves of 4 D - 1.
+    unsigned d_min = (trim_room ? 2u : 1u) + (dual ? 0u : 1u);
     unsigned f_max = dual ? I2S_DUAL_SLOTS_MAX : I2S_DIRECT_SLOTS;
     for (unsigned slots = i2s_min_slots(s); slots <= f_max; slots++) {
         if (c_out % slots != 0)
             continue;
         uint32_t per_slot = c_out / slots;
-        for (unsigned n = 4; n * d_min <= per_slot; n++) {
-            if (per_slot % n != 0)
+        for (unsigned n = dual ? 4u : 8u; n * d_min <= per_slot; n++) {
+            if (per_slot % n != 0 || (!dual && n % 8u != 0))
                 continue;
             uint32_t d = per_slot / n;
             if (d > 255u)
@@ -190,15 +195,18 @@ static inline unsigned i2s_frame_cycles(const i2s_timing_t *t) {
     return (unsigned)t->slots * t->cycles;
 }
 
-// DEM clock period in state-machine cycles: always the oversampled word
-// rate (8x Fs below 50 kHz, 4x above), also with NOS and the sinc
-// compensation, where it is BCLK / 2 or BCLK / 4 (dual16, 16 slots). A
+// Dual16: period of the TDA1541A DEM clock in state-machine cycles (the
+// clock state machine shares the I2S one's divider): always the
+// oversampled word rate (8x Fs below 50 kHz, 4x above), also with NOS and
+// the sinc compensation, where it is BCLK / 2 or BCLK / 4 (16 slots); a
 // whole number of periods per frame, so it stays phase-locked to LATCH.
-// 0 if the frame does not divide.
-static inline unsigned i2s_dem_period(const i2s_timing_t *t, uint32_t rate) {
+// 0 for the other formats, or if the frame does not divide.
+static inline unsigned i2s_dem_period(const i2s_timing_t *t, i2s_format_t f, uint32_t rate) {
     unsigned dem_osr = i2s_filter_osr(I2S_FILTER_SHARP, rate);
     unsigned frame = i2s_frame_cycles(t) * t->osr;
-    return t->osr <= dem_osr && frame % dem_osr == 0 ? frame / dem_osr : 0u;
+    if (f != I2S_FORMAT_DUAL_16 || t->osr > dem_osr || frame % dem_osr != 0)
+        return 0u;
+    return frame / dem_osr;
 }
 
 // Words a block of n_frames output frames occupies: n_frames x F x
@@ -258,7 +266,34 @@ static inline unsigned i2s_program_build(uint16_t *prog, const i2s_timing_t *t, 
     return len;
 }
 
-// Builds a 50 % square wave on the set pin into prog[I2S_DEM_PROGRAM_MAX]:
+// Builds the direct formats' MCLK program into prog[I2S_CLOCK_PROGRAM_MAX]
+// for the clock state machine running at clk_sys (divider 1): two MCLK
+// periods of 2 D cycles per BCLK half (4 D cycles, N = 8), restarted on
+// every BCLK edge read back from the pad (`wait gpio`), so it follows the
+// I2S state machine's divider, dithered or not, without a divider of its
+// own: the wait ends MCLK's last low half, so a BCLK half that the
+// fractional divider makes longer or shorter than 4 D cycles (a positive
+// trim runs INT D - 1 with FRAC near 256: halves of 4 D - 1) moves that
+// low half by the same amount. MCLK rises 3 cycles after each BCLK edge
+// (2 of pad synchroniser, 1 of wait), a fixed offset; the wait is reached
+// D - 2 cycles before a nominal edge. Wrap target 0, wrap at length - 1.
+// Returns the length, 0 for D < 2.
+static inline unsigned i2s_mclk_program_build(uint16_t *prog, unsigned d, unsigned bclk_gpio) {
+    if (d < 2u || d > 32u)
+        return 0;
+    unsigned len = 0;
+    for (unsigned level = 2; level-- > 0;) {        // the rising, then the falling edge
+        prog[len++] = (uint16_t)pio_encode_wait_gpio(level != 0, bclk_gpio);
+        prog[len++] = (uint16_t)(pio_encode_set(pio_pins, 1) | pio_encode_delay(d - 1u));
+        prog[len++] = (uint16_t)(pio_encode_set(pio_pins, 0) | pio_encode_delay(d - 1u));
+        prog[len++] = (uint16_t)(pio_encode_set(pio_pins, 1) | pio_encode_delay(d - 1u));
+        prog[len++] = (uint16_t)pio_encode_set(pio_pins, 0);   // the wait ends this half
+    }
+    return len;
+}
+
+// Builds a 50 % square wave on the set pin into prog[I2S_CLOCK_PROGRAM_MAX]
+// (the dual16 DEM clock, on the I2S state machine's divider):
 // per half `set pins`, then for halves over 16 cycles `set y` and a
 // `jmp y--` loop of 8 cycles per pass, the remainder in the delays and a
 // trailing nop, so each half lasts exactly period_cycles / 2 state-machine
@@ -266,7 +301,7 @@ static inline unsigned i2s_program_build(uint16_t *prog, const i2s_timing_t *t, 
 // first instruction, so a state machine enabled together with the I2S one
 // (same divider) rises with its frame start. Wrap target 0, wrap at
 // length - 1. Returns the length, 0 if the period is odd or over 560.
-static inline unsigned i2s_dem_program_build(uint16_t *prog, unsigned period_cycles) {
+static inline unsigned i2s_clock_program_build(uint16_t *prog, unsigned period_cycles) {
     if (period_cycles < 2u || period_cycles % 2u != 0)
         return 0;
     unsigned half = period_cycles / 2u, len = 0;

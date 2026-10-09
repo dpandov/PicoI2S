@@ -313,7 +313,7 @@ UAC1:  b1 none | S1 44100/16 ff4935 ur0 run1 led1 tx44100 ov0 lt0 rmin144 fmax54
 | `rmin<N>` | lowest output ring level while playing, in frames (target 192) |
 | `fmax<N>` | highest receive FIFO level in bytes |
 | `lp<us>` | longest main-loop iteration in microseconds |
-| `tr<ppm>L/U` | UAC1 only: S/PDIF rate trim in ppm, following the host. It is +186 (32 / 48 kHz) or +344 (44.1 kHz) to cancel the PLL error, plus the host clock's offset against the Pico crystal. `L` locked, `U` acquiring or not playing |
+| `tr<ppm>L/U` | While the output follows an external clock (UAC1 mode, or the S/PDIF input playing): rate trim in ppm, +186 (32 / 48 kHz) or +344 (44.1 kHz) to cancel the PLL error, plus the source clock's offset against the Pico crystal. `L` locked, `U` acquiring or not playing |
 | `v<dB>` / `vM` | host volume: attenuation 0 to 64 dB, or muted (or below -64 dB). `v0` is bit-perfect; below 0 dB the output is scaled and flagged as 24-bit |
 
 `ur`, `ov`, `lt` and `rmin` count from the start of the current or last

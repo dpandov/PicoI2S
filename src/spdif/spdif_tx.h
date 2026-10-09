@@ -54,7 +54,9 @@ typedef struct {
     // From spdif_tx_stop(), after the S/PDIF DMA is aborted and its state
     // machine disabled: stop and park the pins.
     void (*stop)(void);
-    // Mirror of spdif_tx_set_trim_ppb() / spdif_tx_trim_task().
+    // Mirror of spdif_tx_set_trim_ppb() (main loop) and the dither step,
+    // called from the dither timer interrupt every SPDIF_TX_DITHER_US
+    // while running; set_trim_ppb() is called with that interrupt masked.
     void (*set_trim_ppb)(int32_t ppb);
     void (*trim_task)(void);
 } spdif_tx_companion_t;
@@ -90,15 +92,16 @@ bool spdif_tx_set_word_bits(uint8_t word_bits);
 
 // Rate trim in parts per billion (positive = faster) relative to the
 // integer-divider rate, for following an external clock. Clamped to
-// +/-SPDIF_TRIM_MAX_PPB (spdif_trim.h). Applied by spdif_tx_trim_task(),
-// without re-phasing the output. Reset to 0 by spdif_tx_start(). Returns
-// false if stopped. Main loop only.
+// +/-SPDIF_TRIM_MAX_PPB (spdif_trim.h). Applied by dithering the PIO
+// divider fraction from a timer interrupt (SPDIF_TX_DITHER_US), without
+// re-phasing the output. Reset to 0 by spdif_tx_start(). Returns false if
+// stopped. Main loop only.
 bool spdif_tx_set_trim_ppb(int32_t ppb);
 int32_t spdif_tx_trim_ppb(void);
 
-// Applies the trim by dithering the PIO divider fraction. Call every
-// main-loop iteration; returns at once while the trim is 0.
-void spdif_tx_trim_task(void);
+// Dither interval: the sawtooth the dither leaves on the output clocks is
+// one divider-fraction step over this time (spdif_trim.h).
+#define SPDIF_TX_DITHER_US 25u
 
 // Rate error of the running output at zero trim against its nominal sample
 // rate, in ppb, from the configured clk_sys (see clock/audio_clock.c). 0

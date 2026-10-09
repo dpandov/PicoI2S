@@ -797,8 +797,6 @@ void audio_pipeline_task(void) {
             switch_source(SRC_USB, now);
         }
     }
-
-    spdif_tx_trim_task();
 }
 
 bool audio_pipeline_playing(void) {

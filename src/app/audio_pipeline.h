@@ -83,7 +83,6 @@ typedef struct {
 void audio_pipeline_init(void);
 
 // Call every main-loop iteration, after tud_task() and spdif_rx_task().
-// Also applies the transmitter rate trim (spdif_tx_trim_task()).
 void audio_pipeline_task(void);
 
 // USB stream samples are going out (pre-roll done, no underrun since).

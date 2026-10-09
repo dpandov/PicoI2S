@@ -10,7 +10,8 @@ a few times per second and prints one timestamped line per event:
     playing (stream samples going out) / stalled / underrun
     S/PDIF output on / off (3 s after the audio ended)
     digital silence (all-zero samples for --silence seconds) / signal
-    volume changes, clock lock (UAC1), counter increases (ov, lt, late I2S blocks)
+    volume changes, clock lock (UAC1 and the S/PDIF input), counter increases
+    (ov, lt, late I2S blocks)
     S/PDIF input: lock / loss of lock per input (coax, Toslink), the input
         selected and its rate, playing / stopped playing, the output
         changing hands between USB and the input, pre-emphasis on / off,
@@ -267,7 +268,9 @@ class Monitor:
         if p is not None and st["volume"] != p["volume"]:
             self.out(f"volume {fmt_volume(st['volume'])}")
 
-        if st["uac1"] and p is not None and st["locked"] != p["locked"] and run:
+        # The input's trim counts as playing too (run is USB playback).
+        trimmed_play = run or (se and se.get("source") in ("coax", "toslink"))
+        if st["trim"] is not None and p is not None and st["locked"] != p["locked"] and trimmed_play:
             if st["locked"]:
                 self.out(f"clock locked, trim {st['trim']:+d} ppm")
             else:
@@ -418,7 +421,7 @@ class Monitor:
         parts.append(f"fifo {f.get('ff', 0)} B")
         parts.append(f"ring min {f.get('rmin', 0)}")
         parts.append(f"loop {f.get('lp', 0) / 1000:.2f} ms")
-        if st["uac1"]:
+        if st["trim"] is not None:
             parts.append(f"trim {st['trim']:+d} ppm {'locked' if st['locked'] else 'unlocked'}")
         parts.append(fmt_volume(st["volume"]))
         if self.silent_since is not None:

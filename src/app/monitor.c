@@ -85,10 +85,12 @@ static long trim_ppm(int32_t ppb) {
     return (long)((ppb + (ppb < 0 ? -500 : 500)) / 1000);
 }
 
-// Format documented in tools/diag.py. At most 93 characters in UAC2 mode
+// Format documented in tools/diag.py. At most 93 characters untrimmed
 // (rmin and fmax have at most 3 and 4 digits). UAC1 mode shows '1' in place
-// of the Apple host flag and adds the rate trim and servo lock before the
-// volume; counters stop two digits earlier so that it stays within 94.
+// of the Apple host flag. While the output follows an external clock (UAC1
+// mode, or the S/PDIF input playing) the rate trim and servo lock come
+// before the volume; counters stop two digits earlier so that it stays
+// within 94.
 static void update_diag_status(void) {
     static uint64_t last_us;
     uint64_t now = time_us_64();
@@ -104,7 +106,10 @@ static void update_diag_status(void) {
     audio_pipeline_get_stats(&ps);
     static const char link_chr[] = {'D', 'I', 'S'};
     bool uac1 = usb_audio_mode() == USB_AUDIO_MODE_UAC1;
-    uint32_t max = uac1 ? 9999u : 999999u;
+    audio_pipeline_source_t src;
+    audio_pipeline_get_source(&src);
+    bool trimmed = uac1 || src.heard == AUDIO_SOURCE_COAX || src.heard == AUDIO_SOURCE_TOSLINK;
+    uint32_t max = trimmed ? 9999u : 999999u;
     char buf[96];
     int n = snprintf(buf, sizeof(buf),
                      "%c%c %lu/%u ff%u ur%lu run%d led%d tx%lu ov%lu lt%lu rmin%lu fmax%lu lp%lu",
@@ -116,7 +121,7 @@ static void update_diag_status(void) {
                      clamp_cnt(ps.overruns, max), clamp_cnt(ps.late_irqs, max),
                      clamp_cnt(ps.ring_min, max), clamp_cnt(ps.fifo_max, max),
                      clamp_cnt(ps.loop_max_us, max));
-    if (uac1 && n > 0 && (size_t)n < sizeof(buf)) {
+    if (trimmed && n > 0 && (size_t)n < sizeof(buf)) {
         n += snprintf(buf + n, sizeof(buf) - (size_t)n, " tr%ld%c", trim_ppm(ps.trim_ppb),
                       ps.clock_locked ? 'L' : 'U');
     }

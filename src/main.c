@@ -69,8 +69,11 @@ int main(void) {
     unsigned filter_code;
     read_jumpers(&mode, &i2s_format, &filter_code);
     i2s_filter_type_t i2s_filter = i2s_filter_from_code(filter_code);
-    // First: diag_init() derives its SysTick period from clk_sys.
-    audio_clock_init(mode == USB_AUDIO_MODE_UAC1 ? AUDIO_CLOCK_FAST : AUDIO_CLOCK_ACCURATE);
+    // First: diag_init() derives its SysTick period from clk_sys. The
+    // direct I2S formats carry a 256 Fs MCLK, which needs the fast table's
+    // even dividers.
+    bool fast_clocks = mode == USB_AUDIO_MODE_UAC1 || !i2s_format_is_dual(i2s_format);
+    audio_clock_init(fast_clocks ? AUDIO_CLOCK_FAST : AUDIO_CLOCK_ACCURATE);
     audio_clock_set_rate(48000);
     diag_init();
     monitor_init();

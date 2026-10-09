@@ -11,7 +11,11 @@
 // out the exact 61.44 MHz at 96 kHz. 153.6 and 152.4 MHz are 2.4 and 1.6 %
 // above the RP2350's 150 MHz rating. Fast: the highest clk_sys below
 // 150 MHz, for UAC1, where the clock servo cancels the error and a fine
-// trim step matters more.
+// trim step matters more; its dividers are all multiples of 4, which the
+// 256 Fs MCLK of the direct I2S formats needs (period div / 2 cycles,
+// 50 %), so those formats use it in UAC2 mode too. No in-spec setting
+// with an even divider is more accurate than -186 / -344 ppm at 44.1 /
+// 48 kHz with a 50 % MCLK.
 // Receivers accept +/-1000 ppm; UAC2 hosts follow the feedback.
 typedef struct {
     uint32_t rate;

@@ -30,11 +30,11 @@ Output fields:
     fmax<N>     highest receive FIFO level in bytes
     lp<us>      longest main-loop iteration in microseconds
                 (~1000 at 96 kHz loses a USB packet)
-    tr<ppm>L/U  UAC1 mode only: S/PDIF rate trim in ppm, the adaptive clock
-                following the host: +186 (32/48 kHz) or +344 (44.1 kHz) to
-                cancel the PLL error, plus the host clock offset against the
-                Pico crystal. L = clock servo locked, U = acquiring or not
-                playing
+    tr<ppm>L/U  while the output follows an external clock (UAC1 mode, or
+                the S/PDIF input playing): rate trim in ppm, +186 (32/48 kHz)
+                or +344 (44.1 kHz) to cancel the PLL error, plus the source
+                clock's offset against the Pico crystal. L = clock servo
+                locked, U = acquiring or not playing
     v<dB>/vM    host volume (Feature Unit): attenuation in dB, 0 to 64, or M
                 when muted (or set below -64 dB). v0 is bit-perfect; below
                 0 dB the output is scaled and flagged as 24-bit. Last token
@@ -42,7 +42,7 @@ Output fields:
     ur, ov, lt and rmin count from the start of the current or last stream
     (open or format change); fmax and lp from when it began playing, so the
     start-up (pre-roll, clock switch) is excluded. Counters stop at 999999
-    (9999 in UAC1 mode).
+    (9999 while the trim is shown).
 
     e.g. UAC2:  So 48000/24 ff4712 ur0 run1 led1 tx48000 ov0 lt0 rmin144 fmax5240 lp212 v0
          UAC1:  S1 44100/16 ff4935 ur0 run1 led1 tx44100 ov0 lt0 rmin144 fmax5400 lp212 tr361L v12
@@ -134,7 +134,7 @@ def parse_status(s):
     """Diagnostic string -> dict, or None if it is not one.
 
     Keys: boots, prev, link ('D', 'I', 'S'), host ('a', 'o', '1'), uac1,
-    rate, bits, volume (dB or 'M'), trim / locked (UAC1), fields (the
+    rate, bits, volume (dB or 'M'), trim / locked (when trimmed), fields (the
     integer tokens: ff, ur, run, led, tx, ov, lt, rmin, fmax, lp).
     """
     head, sep, app = s.partition(" | ")

@@ -5,11 +5,12 @@
 // 1/(256 x INT), 163 ppm at INT = 24. The target divider carries 16 more
 // fraction bits (Q8.24, so INT < 256), and a first-order sigma-delta in time
 // switches the register between the two FRAC values around it so that the
-// time-weighted mean divider equals the target. It runs every main-loop
-// iteration: the phase error it leaves scales with one FRAC step times the
-// gap between calls (about 50 ns peak-to-peak with 260 us main-loop
-// iterations, 5 ns rms), where dithering once per 2 ms DMA buffer would leave
-// 48 clk_sys cycles (0.33 us) as tones below 250 Hz.
+// time-weighted mean divider equals the target. The phase error it leaves
+// is a sawtooth of about two FRAC steps times the gap between calls:
+// 2 x gap x clk_sys / (256 x INT) clk_sys cycles peak to peak. From a
+// 25 us timer interrupt (spdif_tx.c) that is about 5 cycles (31..38 ns)
+// at INT = 6, under one cycle at INT = 24; from the main loop (260 us) it
+// was ten times that.
 #pragma once
 
 #include <stdbool.h>

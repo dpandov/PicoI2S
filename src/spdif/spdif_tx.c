@@ -25,6 +25,7 @@
 #include "hardware/sync.h"
 #include "hardware/timer.h"
 #include "pico.h"
+#include "pico/time.h"
 
 #include "spdif/spdif_encode.h"
 #include "spdif/spdif_trim.h"
@@ -50,6 +51,8 @@ _Static_assert(SPDIF_TX_BUFFER_FRAMES % CHUNK_FRAMES == 0, "whole chunks per buf
 // Above USB (default 0x80) so encoding is never delayed by USB handling,
 // but below the diagnostic SysTick (0) so a hang in here is still caught.
 #define DMA_IRQ_PRIORITY 0x40
+// The dither timer: short and punctual, so above USB too, below the DMA.
+#define DITHER_IRQ_PRIORITY 0x60
 
 static PIO tx_pio;
 static uint tx_sm;
@@ -77,10 +80,14 @@ static volatile uint32_t generation;
 static volatile uint32_t late_irqs;
 static bool late_prev;          // the last interrupt was late
 
-// Main loop only.
+// Trim: the target is set from the main loop with the dither interrupt
+// masked; the dither runs in that interrupt.
 static spdif_trim_t trim;
 static int32_t trim_ppb;
 static uint32_t trim_reg;       // CLKDIV value last written
+static uint dither_alarm;
+static uint dither_irq;
+static absolute_time_t dither_next;
 
 // State of the last serviced interrupt.
 static uint irq_buf;            // buffer the DMA was reading
@@ -88,6 +95,39 @@ static uint32_t irq_time;       // timer, us
 static uint32_t buf_us;         // one buffer period, us
 
 static void tx_stop(void);
+
+// Every SPDIF_TX_DITHER_US while running: one dither step for the S/PDIF
+// state machine and the companion's. Writing CLKDIV while running does
+// not restart the divider (only CTRL.CLKDIV_RESTART does), so the cell
+// phase stays continuous. The companion runs first: its sawtooth is the
+// larger one (smaller divider).
+static void dither_step(uint alarm) {
+    (void)alarm;
+    dither_next = delayed_by_us(dither_next, SPDIF_TX_DITHER_US);
+    // The DMA interrupt (higher priority) or a masked stretch can hold this
+    // one past the next target, and a target already passed is not armed
+    // (hardware_alarm_set_target() returns true): take it from now.
+    while (hardware_alarm_set_target(dither_alarm, dither_next))
+        dither_next = delayed_by_us(get_absolute_time(), SPDIF_TX_DITHER_US);
+    if (!running)
+        return;
+    if (companion)
+        companion->trim_task();
+    // On a whole FRAC step there is nothing to dither.
+    if (trim.applied == trim.target)
+        return;
+    uint32_t reg = spdif_trim_clkdiv_reg(spdif_trim_dither(&trim, timer_hw->timerawl));
+    if (reg != trim_reg) {
+        trim_reg = reg;
+        tx_pio->sm[tx_sm].clkdiv = reg;
+    }
+}
+
+static void dither_start(void) {
+    do
+        dither_next = delayed_by_us(get_absolute_time(), SPDIF_TX_DITHER_US);
+    while (hardware_alarm_set_target(dither_alarm, dither_next));
+}
 
 static void change_begin(void) {
     generation++;
@@ -224,6 +264,11 @@ void spdif_tx_init(unsigned pin) {
     irq_add_shared_handler(irq, dma_irq_handler, PICO_SHARED_IRQ_HANDLER_HIGHEST_ORDER_PRIORITY);
     irq_set_priority(irq, DMA_IRQ_PRIORITY);
     irq_set_enabled(irq, true);
+
+    dither_alarm = (uint)hardware_alarm_claim_unused(true);
+    dither_irq = timer_hardware_alarm_get_irq_num(timer_hw, dither_alarm);
+    hardware_alarm_set_callback(dither_alarm, dither_step);
+    irq_set_priority(dither_irq, DITHER_IRQ_PRIORITY);
 }
 
 static void configure_dma(void) {
@@ -301,6 +346,7 @@ static bool tx_start(uint32_t sample_rate, uint8_t word_bits, spdif_source_fn so
     if (companion)
         sm_mask |= companion->arm();
     pio_enable_sm_mask_in_sync(tx_pio, sm_mask);
+    dither_start();
     return true;
 }
 
@@ -308,6 +354,7 @@ static void tx_stop(void) {
     if (!running)
         return;
     running = false;
+    hardware_alarm_cancel(dither_alarm);
     tx_rate = 0;
     tx_error_ppb = 0;
     trim_ppb = 0;
@@ -392,35 +439,21 @@ bool spdif_tx_set_word_bits(uint8_t word_bits) {
     return ok;
 }
 
-// Writing CLKDIV while running does not restart the divider (only
-// CTRL.CLKDIV_RESTART does), so the cell phase stays continuous.
 bool spdif_tx_set_trim_ppb(int32_t ppb) {
     if (!running || tx_div > 255u)
         return false;
     trim_ppb = spdif_trim_clamp(ppb);
-    spdif_trim_set_target(&trim, spdif_trim_divider(tx_div, trim_ppb), timer_hw->timerawl);
+    uint32_t target = spdif_trim_divider(tx_div, trim_ppb);
+    irq_set_enabled(dither_irq, false);
+    spdif_trim_set_target(&trim, target, timer_hw->timerawl);
     if (companion)
         companion->set_trim_ppb(trim_ppb);
+    irq_set_enabled(dither_irq, true);
     return true;
 }
 
 int32_t spdif_tx_trim_ppb(void) {
     return trim_ppb;
-}
-
-void spdif_tx_trim_task(void) {
-    if (!running)
-        return;
-    if (companion)
-        companion->trim_task();
-    // On a whole FRAC step there is nothing to dither.
-    if (trim.applied == trim.target)
-        return;
-    uint32_t reg = spdif_trim_clkdiv_reg(spdif_trim_dither(&trim, timer_hw->timerawl));
-    if (reg != trim_reg) {
-        trim_reg = reg;
-        tx_pio->sm[tx_sm].clkdiv = reg;
-    }
 }
 
 int32_t spdif_tx_rate_error_ppb(void) {

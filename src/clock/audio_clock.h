@@ -8,7 +8,9 @@
 
 typedef enum {
     AUDIO_CLOCK_ACCURATE,   // lowest PLL error: the Pico is the clock master (UAC2)
-    AUDIO_CLOCK_FAST,       // highest clk_sys: the clock servo cancels the error (UAC1)
+    AUDIO_CLOCK_FAST,       // highest clk_sys, S/PDIF dividers multiples of 4: the
+                            // clock servo cancels the error (UAC1), and the direct
+                            // I2S formats need the even divider for their MCLK
 } audio_clock_profile_t;
 
 // Selects the PLL table. Call once, before the first audio_clock_set_rate().
