@@ -249,12 +249,12 @@ generated analysis go in `scratch/` at the repository root. This folder and
      byte for byte.)
    - Adaptive clock: the PLL setting and integer PIO divider stay as in
      UAC2; a control loop on the USB FIFO level trims the PIO divider's
-     8-bit fraction (dithered between adjacent values for finer average
-     resolution). The trim stays within a few hundred ppm, so the
+     8-bit fraction. The trim stays within a few hundred ppm, so the
      fraction sits near 0 or 256 and the added jitter is rare single
-     clk_sys stretches; the dither between the two FRAC values runs from
-     a 25 us timer interrupt (`SPDIF_TX_DITHER_US`), so its sawtooth stays
-     small and above the audio band (step 9's known limitation). (done:
+     clk_sys stretches. For finer resolution the divider is switched
+     between the two adjacent FRAC values with a fixed 25 us period
+     (`SPDIF_TX_DITHER_US`), by hardware (step 9's known limitation).
+     (done:
      `app/clock_servo.c`, `spdif_tx_set_trim_ppb()`.
      The pipeline starts the servo in `begin_playing()`, seeded with minus
      the PLL error on a fresh output, or resumed with
@@ -335,10 +335,29 @@ generated analysis go in `scratch/` at the repository root. This folder and
      block and are enabled in one write (`pio_enable_sm_mask_in_sync`),
      and both outputs consume one input frame per the same number of
      clk_sys cycles, so they stay sample-aligned without any
-     cross-checking. Same trim target in UAC1 mode; the S/PDIF and I2S
-     state machines dither separately (different dividers), so their
-     relative phase wanders by the sum of their sawtooths (see the known
-     limitation; sub-microsecond, irrelevant between the two outputs).
+     cross-checking. Same trim target in the trimmed modes; the S/PDIF and
+     I2S state machines are switched by separate pacers from separate
+     rings (different dividers), so their relative phase wanders by at
+     most the sum of the two triangles (see the known limitation; a few
+     ns), and their mean rates would differ by the two rings' rounding,
+     up to about 20 ppb (6 frames per hour at worst), which over a day
+     would skip or repeat an I2S block. A phase lock removes it: every
+     live fill adds how far its target buffer lies ahead of the I2S DMA
+     (words); at each servo window (48 ms, `clock_servo_update()` now
+     reports every closed window) `companion_trim_offset_ppb()` takes the
+     window's mean, the first window after a start as the reference, the
+     drift against it (wrapped modulo two buffers, the parity step of
+     `live_target()`) and returns a proportional offset, -5000 ppb per
+     buffer of drift, clamped to +-2000 ppb, which
+     `spdif_tx_set_trim_ppb()` adds to the companion's pacer target only
+     (positive = faster). Time constant 200..600 s (96..32 kHz), steady
+     lead under a frame at the natural mismatch, 0.2 buffers at 1000 ppb;
+     the offset is quantised by the Q8.24 target (7..20 ppb). Modelled
+     over 3 h at every rate and both paths; on the board (UAC1, 44.1 kHz,
+     I2S direct) an injected +1000 ppb mismatch settled to an offset of
+     -1050 ppb and 40 words of lead in 15 min with no late block, and
+     +10000 ppb pinned the clamp and slipped as predicted.
+     `i2s_tx_trim_offset_ppb()` / `i2s_tx_phase_drift_words()` expose it.
      Stops with S/PDIF after the 3-s silence (clocks low
      when idle; DACs that dislike clock loss can get a keep-running option
      later).
@@ -360,19 +379,22 @@ generated analysis go in `scratch/` at the repository root. This folder and
      has its cycle of slack (N = 8 everywhere on the fast table, D = 9 /
      6 / 6 / 3 / 3 at 32 .. 96 kHz);
      fast slew on the pin, up to 24.6 MHz. In dual-line 16 it is the
-     TDA1541A DEM clock (`i2s_clock_program_build()`, a 50 % square wave
-     of `i2s_dem_period()` cycles on the I2S state machine's divider,
-     rising with the frame start, the same CLKDIV value written in the
-     same dither step), always at the oversampled word rate (8x Fs below
-     50 kHz, 4x above), also with NOS and sinc, where it is BCLK / 2 or
-     BCLK / 4, so it stays well above the audio band; the user feeds it to
-     the TDA1541A's DEM oscillator pin in place of the capacitor. The pin
-     is a plain low GPIO in the other dual-line formats. Two state
-     machines on separate dithered dividers wander against each other
-     even when written back to back (the writes land a cycle or two
-     apart: measured on the board, the MCLK phase random-walked over a
-     whole period within seconds in UAC1 mode), hence the `wait gpio`
-     design for MCLK; the DEM clock does not mind.
+     TDA1541A DEM clock (`i2s_dem_program_build()`, 10 instructions): like
+     MCLK it runs at clk_sys (divider 1) and is slaved to BCLK read back
+     from the pad, high for k BCLK periods and low for k, counting BCLK
+     edges with `wait gpio`; k = 8 with the 8x / 4x filters (16 slots per
+     output word), 1 with NOS / sinc at 32 .. 48 kHz (BCLK / 2), 2 at
+     88.2 / 96 kHz (BCLK / 4; `i2s_dem_half_bclks()`), so it is always at
+     the oversampled word rate, well above the audio band. It starts in
+     sync with the I2S state machine, so it rises with the frame start
+     and then every 2k BCLK periods, every edge a fixed 4 clk_sys after
+     the BCLK edge (2 of pad synchroniser, the wait, the jmp): constant
+     phase to LATCH, 50 % duty, and no wander against the trimmed divider.
+     The user feeds it to the TDA1541A's DEM oscillator pin in place of
+     the capacitor. The pin is a plain low GPIO in the other dual-line
+     formats. (A DEM clock on its own divider wandered against the I2S
+     one, as MCLK did on the board: the writes of two dithered dividers
+     land a cycle or two apart.)
    - Filters (dual-line only; I2S / LJ / RJ never). Intent: sharp is the
      reference, the de-facto industry standard; every other filter exists
      for better perceived sound with minimum pre- and post-ringing, and
@@ -549,20 +571,46 @@ generated analysis go in `scratch/` at the repository root. This folder and
      (dual-line 16), the short soak in both modes; then the README wiring
      and format table are final.
    - Known limitation: in the trimmed modes (UAC1, the S/PDIF input) the
-     software dither between adjacent divider fractions (spdif_trim.h)
-     leaves a sawtooth phase error on the I2S clocks, MCLK included: one
-     FRAC step (1/256 clk_sys per state-machine cycle) accumulated over
-     the dither interval. The dither runs from a 25 us timer interrupt
-     (`SPDIF_TX_DITHER_US`, spdif_tx.c, priority between the DMA and USB
-     interrupts, about 2 % of core 0): modelled 31..38 ns peak to peak at
-     D = 6 (direct formats at 44.1 / 48 kHz), 57..68 ns at D = 3 (88.2 /
-     96 kHz), 20..37 ns at D = 9, a few ns at D = 24 (S/PDIF), repeating
-     at 40 kHz, i.e. above the audio band. From the main loop (260 us) it
-     was ten times that at a few kHz. The hardware fraction's own
-     stretches are single clk_sys cycles. Asynchronous DACs ignore it,
-     synchronous ones see it as jitter. UAC2 USB playback has none. The
-     filters and the DEM clock exist for the dual-line formats only,
-     MCLK for the direct formats only.
+     trim can only set the PIO divider's 8-bit fraction (one FRAC step is
+     1/(256 x INT) of the rate: 651 ppm at INT = 6, 163 ppm at INT = 24),
+     so each trimmed state machine's CLKDIV switches between the two
+     adjacent FRAC values with a fixed 25 us period (`SPDIF_TX_DITHER_US`):
+     the upper (slower) value for t_hi cycles, the lower for the rest.
+     Hardware does it, no per-period CPU work: a 4-instruction pacer state
+     machine per trimmed clock (`spdif/spdif_pacer.pio`, at clk_sys, on
+     pio0 beside the receiver) counts each half's delay and pushes the
+     CLKDIV value, a DMA channel moves it into CLKDIV (both edges take the
+     same path, so the latency cancels), and a second one feeds the pacer
+     endlessly from a 1 KB ring of 64 periods x (delay, value)
+     (`spdif_trim_pattern()`, `spdif_trim.h`). The ring carries the
+     fraction as a first-order sigma-delta over its 64 periods (about
+     0.0015 ppm resolution at INT = 6, exact mean rate);
+     `spdif_tx_set_trim_ppb()` rewrites it in place from the servo (every
+     48 ms); a half-updated pair mis-times at most one half period. The
+     transmitter owns both pacers; the companion's `trim_divider()` hands
+     over the I2S state machine's divider and CLKDIV register. Phase
+     error: a 40 kHz triangle, above the audio band whatever the trim, of
+     f(1-f) x T / (256 x INT) clk_sys cycles peak to peak, at most
+     T / (1024 x INT): about 4 ns at INT = 6 (direct formats at 44.1 /
+     48 kHz), 6 ns at INT = 4, 8 ns at INT = 3 (88.2 / 96 kHz), about 1 ns
+     on S/PDIF (INT = 24); zero on a whole FRAC step; lines below 20 kHz
+     under 0.02 ns. The hardware divider's own single clk_sys stretches
+     (about 7 ns, at a multi-MHz rate) remain. Measured before this: a
+     sigma-delta decided every 25 us from a timer interrupt cost 11 % of
+     core 0 and put its tone in the audio band; a fixed-period scheme with
+     three interrupts per period 18 %. Verified on the RP2350-One: core-0
+     interrupt load in UAC1 at 44.1 kHz 8.4 % in total (USB and DMA; 19.8 %
+     with the interrupt dither), the UAC1 sweep ALL PASS five times in a
+     row, 2-min soaks at 32 / 44.1 / 48 kHz with MCLK locked within 4 ppm
+     of 256 Fs x (1 + trim), the input matrices in UAC2 and UAC1 (with
+     emphasis), an 8-min cycling soak, a forced dual16 UAC1 sweep. Within
+     one state machine every edge moves together (data to BCLK timing
+     untouched); in the dual-line formats the LATCH edge carries the
+     jitter as sampling-time jitter; MCLK and the DEM clock follow BCLK
+     through `wait gpio`. Asynchronous DACs ignore it, synchronous ones
+     see it as low-level jitter. UAC2 USB playback has none. The filters
+     and the DEM clock exist for the dual-line formats only, MCLK for the
+     direct formats only.
 10. Latency: FIFO set point in time, not bytes. (done; lip-sync judged
     good on Windows with video)
     - Before: the receive FIFO (9312 bytes, sized for 96 kHz / 24-bit) was
@@ -663,9 +711,11 @@ generated analysis go in `scratch/` at the repository root. This folder and
       frames under the old nominal rate.
     - Resources: pio2 transmitter block (the SDK's free-SM search starts at
       the last block; RP2350-One: WS2812, S/PDIF, I2S, DEM: full), pio0
-      receiver (2 SMs, 26 instructions), pio1 self-test captures (they skip
-      the transmitter's block, prefer pio2, then pio1); DMA 2 + 2 + 2 (+ 2
-      self-test) of 16. State machines are enabled and disabled with the
+      receiver (2 SMs, 26 instructions) and the two trim pacers (2 SMs,
+      4 instructions): 4 of 4 SMs, 30 of 32 instructions, both users
+      driven from core 0; pio1 self-test captures (they skip the
+      transmitter's block, prefer pio2, then pio1); DMA S/PDIF TX 2 +
+      pacers 4 + I2S 2 + receiver 2 = 10 of 16 (12 with the self-test). State machines are enabled and disabled with the
       atomic CTRL aliases where a block may be shared across the cores.
     - Source arbitration (`app/audio_pipeline.c`, `p.src` owns the ring
       and the output): USB has priority. The input takes the output after
@@ -691,9 +741,10 @@ generated analysis go in `scratch/` at the repository root. This folder and
       frames, i.e. 6 ms, chunk 96), started with
       `SPDIF_TX_START_TRIMMED | SPDIF_TX_START_EMPHASIS` (UAC1 USB:
       `TRIMMED`; UAC2 USB: 0, untrimmed). Bit-perfect, NOS stays
-      unfiltered, input jitter rejected; the cost is the trim's dither
-      sawtooth on the I2S clocks (step 9's known limitation: 31..38 ns
-      peak to peak at 44.1 / 48 kHz, at 40 kHz). If the scope or listening
+      unfiltered, input jitter rejected; the cost is the trim's switching
+      phase error on the I2S clocks (step 9's known limitation: about
+      4 ns peak to peak at 44.1 / 48 kHz, at 40 kHz, plus the hardware
+      divider's 7 ns stretches). If the scope or listening
       shows it matters, add option C: an ASRC for the
       oversampling filters only (NOS and sinc stay on the servo), which
       needs an explicit exception to "never resample" for this path.
@@ -805,12 +856,18 @@ generated analysis go in `scratch/` at the repository root. This folder and
 - UAC1 endpoint classification (`audiod_open()` / SET_INTERFACE): a data
   endpoint declared without a sync type is taken for a feedback endpoint.
   The UAC1 data endpoint is adaptive (0x09).
-- A zero-length ISO OUT packet still stops reception until the next
-  SET_INTERFACE (`audiod_rx_xfer_isr()` returns at
-  `TU_VERIFY(0 < tu_fifo_write_n(...))` before the re-arm, without calling
-  `tud_audio_rx_done_isr()`). Spec-compliant hosts do not send them;
-  `usb_audio.c` sees the idle endpoint from the main loop and counts one bad
-  packet per stream.
+- A zero-length ISO OUT packet leaves the endpoint unarmed
+  (`audiod_rx_xfer_isr()` returns at `TU_VERIFY(0 < tu_fifo_write_n(...))`
+  before the re-arm, without calling `tud_audio_rx_done_isr()`), so
+  reception would stop until the next SET_INTERFACE. Spec-compliant hosts
+  do not send them, but a UAC1 stream once died this way right after a
+  rate change. `check_rx_halt()` in `usb_audio.c` sees the idle endpoint
+  from the main loop and re-arms it with the driver's own buffer and size
+  (recorded by the `usbd_edpt_xfer` wrapper), check and arm in one
+  critical section, at most once per ms, giving up after three failures
+  until the next stream; one bad packet is counted per halt. A main-loop
+  pass under about 0.9 ms loses no packet; each further ms loses one
+  (a 1 ms splice, frame-aligned, no underrun below about six).
 - Feedback parameters are only read at SET_INTERFACE, not on a UAC2
   sample-rate change while streaming (UAC1 re-reads them on the endpoint
   SET_CUR).

@@ -163,9 +163,10 @@ two (AD1865 LL and LR).
   word rate with every filter, NOS included: 256 / 352.8 / 384 kHz at
   32 / 44.1 / 48 kHz and 352.8 / 384 kHz at 88.2 / 96 kHz. With NOS and
   the sinc compensation, which run at the sample rate, that is BCLK / 2
-  (BCLK / 4 at 88.2 / 96 kHz), its edges on BCLK's falling edges. It is
-  phase-locked to LATCH and comes from a third PIO state machine on the
-  same block with the same divider and trim. It is meant for the
+  (BCLK / 4 at 88.2 / 96 kHz). It is phase-locked to LATCH: a third PIO
+  state machine on the same block runs at the system clock and counts
+  BCLK edges read back from the pin, so every edge follows BCLK by a
+  fixed 4 system clocks, trim or not. It is meant for the
   TDA1541A's DEM oscillator pin (pin 16), in place of the capacitor. The
   pin is low in every other format.
 
@@ -222,14 +223,16 @@ rate, so BCLK is 8 or 4 times lower (dual-line 16: 16 x Fs).
 Limitations: the filters and the DEM clock exist for the dual-line formats
 only, MCLK for the direct formats only. In UAC1 mode and with the S/PDIF
 input the clock trim that follows the source's rate is a fractional PIO
-divider, dithered between adjacent steps every 25 us: the I2S clocks,
-MCLK included, carry a sawtooth phase error of about 35 ns peak to peak
-at 44.1 / 48 kHz (65 ns at 88.2 / 96 kHz) at 40 kHz, above the audio
-band. Asynchronous DACs (ESS type) do not care; a synchronous DAC sees it
-as low-level jitter. UAC2 USB playback has none of it. The 44.1 and 48 kHz settings
-of the dual-line formats run the chip at 152.4 / 153.6 MHz, 1.6 / 2.4 %
-above its 150 MHz rating, to give the filters their cycles without a
-larger clock error (see Clocking below).
+divider, switched between the two adjacent steps by hardware with a
+fixed 25 us period (no CPU work): the I2S clocks, MCLK, the DEM clock and
+the dual-line LATCH carry a phase error of a few ns peak to peak (about
+4 ns at 44.1 / 48 kHz, 8 ns at 88.2 / 96 kHz) at 40 kHz, above the audio
+band, plus the fractional divider's own single-cycle stretches (about
+7 ns). Asynchronous DACs (ESS type) do not care; a synchronous DAC sees
+low-level jitter. UAC2 USB playback has none of it. The 44.1 and 48 kHz
+settings of the dual-line formats run the chip at 152.4 / 153.6 MHz,
+1.6 / 2.4 % above its 150 MHz rating, to give the filters their cycles
+without a larger clock error (see Clocking below).
 
 ### Raspberry Pi Pico 2
 

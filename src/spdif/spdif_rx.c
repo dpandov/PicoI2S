@@ -263,7 +263,8 @@ static void input_init(rx_input_t *in, uint pin, uint sm, uint32_t *ring) {
 // Two state machines and room for the program on a block other than the
 // transmitter's. pio0 first: the SDK's free-SM search (the transmitter)
 // starts at the last block and the self-test's at pio2, so the three
-// normally get a block each.
+// normally get a block each; the transmitter's trim pacers take the other
+// two state machines and 4 instructions of pio0 (spdif_tx.c).
 static bool claim_block(uint sms[2]) {
     static const PIO order[] = {
         pio0,

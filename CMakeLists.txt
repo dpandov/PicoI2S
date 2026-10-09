@@ -54,6 +54,7 @@ add_executable(usb2spdif
 )
 
 pico_generate_pio_header(usb2spdif ${CMAKE_CURRENT_LIST_DIR}/src/spdif/spdif_tx.pio)
+pico_generate_pio_header(usb2spdif ${CMAKE_CURRENT_LIST_DIR}/src/spdif/spdif_pacer.pio)
 pico_generate_pio_header(usb2spdif ${CMAKE_CURRENT_LIST_DIR}/src/spdif/spdif_rx.pio)
 
 # Includes are written relative to src/ (e.g. "usb/usb_audio.h").

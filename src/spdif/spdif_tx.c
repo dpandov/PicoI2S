@@ -12,6 +12,17 @@
 // The completion interrupt locates the data channel's read pointer and
 // re-encodes the other buffer from the source, one chunk at a time, only
 // while the DMA is clear of the chunk being written.
+//
+// Rate trim (SPDIF_TX_START_TRIMMED): a pacer state machine per trimmed
+// clock (the S/PDIF one, the companion's) writes that state machine's
+// CLKDIV register twice per SPDIF_TX_DITHER_US period at cycle-exact times
+// from a ring of (delay, value) pairs (spdif_trim.h, spdif_pacer.pio). A
+// feed channel streams the ring into the pacer's TX FIFO endlessly, a
+// write channel moves every value the pacer pushes into the CLKDIV
+// register. Both writes of a period take the same path, so the DMA latency
+// is common to them and cancels. A CLKDIV write does not restart the
+// divider (only CTRL.CLKDIV_RESTART does), so the output phase stays
+// continuous. No CPU work while running.
 
 #include "spdif/spdif_tx.h"
 
@@ -22,13 +33,14 @@
 #include "hardware/gpio.h"
 #include "hardware/irq.h"
 #include "hardware/pio.h"
+#include "hardware/structs/dma_debug.h"
 #include "hardware/sync.h"
 #include "hardware/timer.h"
 #include "pico.h"
-#include "pico/time.h"
 
 #include "spdif/spdif_encode.h"
 #include "spdif/spdif_trim.h"
+#include "spdif_pacer.pio.h"
 #include "spdif_tx.pio.h"
 
 #define CELLS_PER_FRAME 128u
@@ -51,8 +63,14 @@ _Static_assert(SPDIF_TX_BUFFER_FRAMES % CHUNK_FRAMES == 0, "whole chunks per buf
 // Above USB (default 0x80) so encoding is never delayed by USB handling,
 // but below the diagnostic SysTick (0) so a hang in here is still caught.
 #define DMA_IRQ_PRIORITY 0x40
-// The dither timer: short and punctual, so above USB too, below the DMA.
-#define DITHER_IRQ_PRIORITY 0x60
+
+// Beside the S/PDIF receiver (spdif_rx.c: 2 state machines, 26
+// instructions); the transmitter's block is full on the RP2350-One and
+// pio1 is the self-test's. All of them are driven from core 0.
+#define PACER_PIO       pio0
+#define PACER_RING_BITS 10      // log2 of the ring's size in bytes
+
+_Static_assert(SPDIF_TRIM_RING_WORDS * 4u == 1u << PACER_RING_BITS, "ring size");
 
 static PIO tx_pio;
 static uint tx_sm;
@@ -80,14 +98,23 @@ static volatile uint32_t generation;
 static volatile uint32_t late_irqs;
 static bool late_prev;          // the last interrupt was late
 
-// Trim: the target is set from the main loop with the dither interrupt
-// masked; the dither runs in that interrupt.
-static spdif_trim_t trim;
+// Trim pacers, [0] S/PDIF, [1] the companion's. Main loop only.
+typedef struct {
+    uint sm;
+    uint dma_feed;              // ring -> TX FIFO
+    uint dma_write;             // RX FIFO -> CLKDIV
+    io_rw_32 *reg;              // CLKDIV register it drives; NULL: stopped
+    uint32_t div;               // integer divider at zero trim
+    uint32_t target;            // Q8.24 divider in the ring
+    uint32_t *ring;
+} pacer_t;
+
+static uint32_t pacer_rings[2][SPDIF_TRIM_RING_WORDS] __attribute__((aligned(1u << PACER_RING_BITS)));
+static pacer_t pacers[2];
+static uint pacer_offset;
+static uint32_t pacer_period;   // SPDIF_TX_DITHER_US in clk_sys cycles
+static bool trimmed;
 static int32_t trim_ppb;
-static uint32_t trim_reg;       // CLKDIV value last written
-static uint dither_alarm;
-static uint dither_irq;
-static absolute_time_t dither_next;
 
 // State of the last serviced interrupt.
 static uint irq_buf;            // buffer the DMA was reading
@@ -96,37 +123,107 @@ static uint32_t buf_us;         // one buffer period, us
 
 static void tx_stop(void);
 
-// Every SPDIF_TX_DITHER_US while running: one dither step for the S/PDIF
-// state machine and the companion's. Writing CLKDIV while running does
-// not restart the divider (only CTRL.CLKDIV_RESTART does), so the cell
-// phase stays continuous. The companion runs first: its sawtooth is the
-// larger one (smaller divider).
-static void dither_step(uint alarm) {
-    (void)alarm;
-    dither_next = delayed_by_us(dither_next, SPDIF_TX_DITHER_US);
-    // The DMA interrupt (higher priority) or a masked stretch can hold this
-    // one past the next target, and a target already passed is not armed
-    // (hardware_alarm_set_target() returns true): take it from now.
-    while (hardware_alarm_set_target(dither_alarm, dither_next))
-        dither_next = delayed_by_us(get_absolute_time(), SPDIF_TX_DITHER_US);
-    if (!running)
-        return;
-    if (companion)
-        companion->trim_task();
-    // On a whole FRAC step there is nothing to dither.
-    if (trim.applied == trim.target)
-        return;
-    uint32_t reg = spdif_trim_clkdiv_reg(spdif_trim_dither(&trim, timer_hw->timerawl));
-    if (reg != trim_reg) {
-        trim_reg = reg;
-        tx_pio->sm[tx_sm].clkdiv = reg;
+static void pacer_init(void) {
+    if (!pio_can_add_program(PACER_PIO, &spdif_pacer_program))
+        panic("spdif_tx: no room for the trim pacer program on pio0");
+    pacer_offset = (uint)pio_add_program(PACER_PIO, &spdif_pacer_program);
+    for (uint k = 0; k < 2u; k++) {
+        pacer_t *p = &pacers[k];
+        int sm = pio_claim_unused_sm(PACER_PIO, false);
+        if (sm < 0)
+            panic("spdif_tx: no free state machine on pio0 for the trim pacer");
+        p->sm = (uint)sm;
+        p->dma_feed = (uint)dma_claim_unused_channel(true);
+        p->dma_write = (uint)dma_claim_unused_channel(true);
+        p->ring = pacer_rings[k];
     }
 }
 
-static void dither_start(void) {
-    do
-        dither_next = delayed_by_us(get_absolute_time(), SPDIF_TX_DITHER_US);
-    while (hardware_alarm_set_target(dither_alarm, dither_next));
+// Starts writing reg (the CLKDIV register of a running state machine at the
+// integer divider div) with the zero-trim pattern: the value it already
+// holds.
+static void pacer_start(pacer_t *p, io_rw_32 *reg, uint32_t div) {
+    p->reg = reg;
+    p->div = div;
+    p->target = div << 24;
+    spdif_trim_pattern(p->ring, SPDIF_TRIM_RING_PERIODS, pacer_period, p->target);
+
+    // The atomic CTRL aliases: the block may be shared with the other core.
+    uint32_t sm_bit = 1u << p->sm;
+    hw_clear_bits(&PACER_PIO->ctrl, sm_bit);
+    pio_sm_config c = spdif_pacer_program_get_default_config(pacer_offset);
+    sm_config_set_out_shift(&c, true, true, 32);
+    sm_config_set_in_shift(&c, true, true, 32);
+    sm_config_set_clkdiv_int_frac8(&c, 1, 0);
+    pio_sm_set_config(PACER_PIO, p->sm, &c);
+    pio_sm_clear_fifos(PACER_PIO, p->sm);
+    pio_sm_restart(PACER_PIO, p->sm);
+    pio_sm_clkdiv_restart(PACER_PIO, p->sm);
+    // OSR empty whatever the restart left in it, so the first `out` pulls
+    // the first delay from the FIFO.
+    pio_sm_exec(PACER_PIO, p->sm, pio_encode_mov(pio_osr, pio_null));
+    pio_sm_exec(PACER_PIO, p->sm, pio_encode_out(pio_null, 32));
+    pio_sm_exec(PACER_PIO, p->sm, pio_encode_jmp(pacer_offset));
+    // Fresh DREQ handshakes for the emptied FIFOs.
+    dma_debug_hw->ch[p->dma_write].dbg_ctdreq = 0;
+    dma_debug_hw->ch[p->dma_feed].dbg_ctdreq = 0;
+
+    // Write first, so the RX FIFO never fills.
+    dma_channel_config d = dma_channel_get_default_config(p->dma_write);
+    channel_config_set_transfer_data_size(&d, DMA_SIZE_32);
+    channel_config_set_read_increment(&d, false);
+    channel_config_set_write_increment(&d, false);
+    channel_config_set_dreq(&d, pio_get_dreq(PACER_PIO, p->sm, false));
+    channel_config_set_high_priority(&d, true);
+    dma_channel_configure(p->dma_write, &d, reg, &PACER_PIO->rxf[p->sm],
+                          dma_encode_endless_transfer_count(), true);
+
+    d = dma_channel_get_default_config(p->dma_feed);
+    channel_config_set_transfer_data_size(&d, DMA_SIZE_32);
+    channel_config_set_read_increment(&d, true);
+    channel_config_set_write_increment(&d, false);
+    channel_config_set_ring(&d, false, PACER_RING_BITS);
+    channel_config_set_dreq(&d, pio_get_dreq(PACER_PIO, p->sm, true));
+    dma_channel_configure(p->dma_feed, &d, &PACER_PIO->txf[p->sm], p->ring,
+                          dma_encode_endless_transfer_count(), true);
+
+    hw_set_bits(&PACER_PIO->ctrl, sm_bit);
+}
+
+// The register keeps the last value written; the next start rewrites it.
+static void pacer_stop(pacer_t *p) {
+    if (!p->reg)
+        return;
+    p->reg = NULL;
+    hw_clear_bits(&PACER_PIO->ctrl, 1u << p->sm);
+    // RP2350-E5: EN cleared before the abort.
+    uint32_t mask = (1u << p->dma_feed) | (1u << p->dma_write);
+    hw_clear_bits(&dma_hw->ch[p->dma_feed].al1_ctrl, DMA_CH0_CTRL_TRIG_EN_BITS);
+    hw_clear_bits(&dma_hw->ch[p->dma_write].al1_ctrl, DMA_CH0_CTRL_TRIG_EN_BITS);
+    dma_hw->abort = mask;
+    while (dma_hw->abort & mask)
+        tight_loop_contents();
+    while ((dma_hw->ch[p->dma_feed].ctrl_trig | dma_hw->ch[p->dma_write].ctrl_trig) &
+           DMA_CH0_CTRL_TRIG_BUSY_BITS)
+        tight_loop_contents();
+    pio_sm_clear_fifos(PACER_PIO, p->sm);
+}
+
+// Rewritten in place while the feed channel reads it: every word is valid
+// in either version, so a read racing the rewrite only mixes the two
+// patterns. A pair read half old, half new (new value, old delay)
+// mis-times one half, and where the reading crosses between the patterns
+// one period mixes them: a phase step of at most one period at one FRAC
+// step per crossing. An interrupt holding the rewrite up only lets the old
+// rate run on where the channel overtakes it.
+static void pacer_set(pacer_t *p, int32_t ppb) {
+    if (!p->reg)
+        return;
+    uint32_t target = spdif_trim_divider(p->div, ppb);
+    if (target == p->target)
+        return;
+    p->target = target;
+    spdif_trim_pattern(p->ring, SPDIF_TRIM_RING_PERIODS, pacer_period, target);
 }
 
 static void change_begin(void) {
@@ -265,10 +362,7 @@ void spdif_tx_init(unsigned pin) {
     irq_set_priority(irq, DMA_IRQ_PRIORITY);
     irq_set_enabled(irq, true);
 
-    dither_alarm = (uint)hardware_alarm_claim_unused(true);
-    dither_irq = timer_hardware_alarm_get_irq_num(timer_hw, dither_alarm);
-    hardware_alarm_set_callback(dither_alarm, dither_step);
-    irq_set_priority(dither_irq, DITHER_IRQ_PRIORITY);
+    pacer_init();
 }
 
 static void configure_dma(void) {
@@ -307,8 +401,7 @@ static bool tx_start(uint32_t sample_rate, uint8_t word_bits, spdif_source_fn so
     tx_div = div;
     tx_error_ppb = rate_error_ppb(div, sample_rate);
     trim_ppb = 0;
-    spdif_trim_reset(&trim, div < 256u ? div : 0u, timer_hw->timerawl);
-    trim_reg = spdif_trim_clkdiv_reg(trim.applied);
+    trimmed = false;
     tx_bits = word_bits;
     buf_us = (SPDIF_TX_BUFFER_FRAMES * 1000000u + sample_rate / 2u) / sample_rate;
     spdif_encoder_init(&encoder, cs);
@@ -328,6 +421,7 @@ static bool tx_start(uint32_t sample_rate, uint8_t word_bits, spdif_source_fn so
         tx_bits = 0;
         return false;
     }
+    trimmed = (options & SPDIF_TX_START_TRIMMED) && div <= 255u;
     fill_buffer(0, false);
     fill_buffer(1, false);
 
@@ -346,7 +440,16 @@ static bool tx_start(uint32_t sample_rate, uint8_t word_bits, spdif_source_fn so
     if (companion)
         sm_mask |= companion->arm();
     pio_enable_sm_mask_in_sync(tx_pio, sm_mask);
-    dither_start();
+    if (trimmed) {
+        // clk_sys only changes while the output is stopped.
+        uint64_t hz = clock_get_hz(clk_sys);
+        pacer_period = (uint32_t)((hz * SPDIF_TX_DITHER_US + 500000u) / 1000000u);
+        pacer_start(&pacers[0], &tx_pio->sm[tx_sm].clkdiv, div);
+        io_rw_32 *reg = NULL;
+        uint32_t cdiv = companion ? companion->trim_divider(&reg) : 0u;
+        if (cdiv >= 1u && cdiv <= 255u && reg)
+            pacer_start(&pacers[1], reg, cdiv);
+    }
     return true;
 }
 
@@ -354,7 +457,9 @@ static void tx_stop(void) {
     if (!running)
         return;
     running = false;
-    hardware_alarm_cancel(dither_alarm);
+    pacer_stop(&pacers[0]);
+    pacer_stop(&pacers[1]);
+    trimmed = false;
     tx_rate = 0;
     tx_error_ppb = 0;
     trim_ppb = 0;
@@ -440,15 +545,12 @@ bool spdif_tx_set_word_bits(uint8_t word_bits) {
 }
 
 bool spdif_tx_set_trim_ppb(int32_t ppb) {
-    if (!running || tx_div > 255u)
+    if (!running || !trimmed)
         return false;
     trim_ppb = spdif_trim_clamp(ppb);
-    uint32_t target = spdif_trim_divider(tx_div, trim_ppb);
-    irq_set_enabled(dither_irq, false);
-    spdif_trim_set_target(&trim, target, timer_hw->timerawl);
-    if (companion)
-        companion->set_trim_ppb(trim_ppb);
-    irq_set_enabled(dither_irq, true);
+    pacer_set(&pacers[0], trim_ppb);
+    int32_t offset = companion && companion->trim_offset_ppb ? companion->trim_offset_ppb() : 0;
+    pacer_set(&pacers[1], spdif_trim_clamp(trim_ppb + offset));
     return true;
 }
 

@@ -118,7 +118,7 @@ static void run_stage_logic(clock_servo_t *s, int64_t e, int64_t raw) {
 }
 
 // One window: average level -> error -> PI.
-static bool close_window(clock_servo_t *s) {
+static void close_window(clock_servo_t *s) {
     int64_t avg_q8 = (int64_t)((s->acc * 256u + s->window_us / 2u) / s->window_us);
     s->acc = 0;
     int64_t e_q8 = avg_q8 - (int64_t)s->setpoint_bytes * 256;
@@ -135,7 +135,7 @@ static bool close_window(clock_servo_t *s) {
         int64_t mean = s->ref_sum / s->ref_n;
         s->ref_ns = clamp64(mean, s->ref_max_ns);
         s->filt_ns = mean - s->ref_ns;
-        return false;
+        return;
     }
     int64_t raw = e - s->ref_ns;
     s->filt_ns += shr_sym(raw - s->filt_ns, s->stage);
@@ -156,7 +156,7 @@ static bool close_window(clock_servo_t *s) {
             s->stage_us = 0;
             s->calm_us = 0;
             s->locked = false;
-            return false;
+            return;
         }
         s->verify_us = s->verify_us > s->window_us ? s->verify_us - s->window_us : 0;
     }
@@ -187,11 +187,7 @@ static bool close_window(clock_servo_t *s) {
     } else {
         s->unlocked_us = add_sat(s->unlocked_us, s->window_us);
     }
-    int32_t trim = (int32_t)(u > hi ? hi : (u < lo ? lo : u));
-    if (trim == s->trim)
-        return false;
-    s->trim = trim;
-    return true;
+    s->trim = (int32_t)(u > hi ? hi : (u < lo ? lo : u));
 }
 
 bool clock_servo_update(clock_servo_t *s, uint32_t fifo_bytes, uint64_t now_us) {
@@ -204,18 +200,19 @@ bool clock_servo_update(clock_servo_t *s, uint32_t fifo_bytes, uint64_t now_us) 
         return false;
     }
     // The level held since the last call; windows end exactly on time.
-    bool changed = false;
+    bool closed = false;
     uint64_t t = s->t_prev;
     while (now_us >= s->win_end) {
         s->acc += (uint64_t)s->level * (s->win_end - t);
         t = s->win_end;
         s->win_end += s->window_us;
-        changed |= close_window(s);
+        close_window(s);
+        closed = true;
     }
     s->acc += (uint64_t)s->level * (now_us - t);
     s->t_prev = now_us;
     s->level = fifo_bytes;
-    return changed;
+    return closed;
 }
 
 int32_t clock_servo_trim_ppb(const clock_servo_t *s) {

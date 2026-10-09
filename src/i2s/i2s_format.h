@@ -195,18 +195,21 @@ static inline unsigned i2s_frame_cycles(const i2s_timing_t *t) {
     return (unsigned)t->slots * t->cycles;
 }
 
-// Dual16: period of the TDA1541A DEM clock in state-machine cycles (the
-// clock state machine shares the I2S one's divider): always the
-// oversampled word rate (8x Fs below 50 kHz, 4x above), also with NOS and
-// the sinc compensation, where it is BCLK / 2 or BCLK / 4 (16 slots); a
-// whole number of periods per frame, so it stays phase-locked to LATCH.
-// 0 for the other formats, or if the frame does not divide.
-static inline unsigned i2s_dem_period(const i2s_timing_t *t, i2s_format_t f, uint32_t rate) {
+// Dual16: BCLK periods per half of the TDA1541A DEM clock. DEM always
+// runs at the oversampled word rate (8x Fs below 50 kHz, 4x above), also
+// with NOS and the sinc compensation, where it is BCLK / 2 or BCLK / 4 (16
+// slots): F x osr / dem_osr BCLK periods per DEM period, a whole number of
+// DEM periods per output frame, so it stays phase-locked to LATCH. 0 for
+// the other formats, or if a half is not a whole number of BCLK periods
+// from 1 to 32.
+static inline unsigned i2s_dem_half_bclks(const i2s_timing_t *t, i2s_format_t f, uint32_t rate) {
     unsigned dem_osr = i2s_filter_osr(I2S_FILTER_SHARP, rate);
-    unsigned frame = i2s_frame_cycles(t) * t->osr;
-    if (f != I2S_FORMAT_DUAL_16 || t->osr > dem_osr || frame % dem_osr != 0)
+    unsigned bclks = (unsigned)t->slots * t->osr;
+    if (f != I2S_FORMAT_DUAL_16 || t->osr == 0 || dem_osr % t->osr != 0 ||
+        bclks % (2u * dem_osr) != 0)
         return 0u;
-    return frame / dem_osr;
+    unsigned k = bclks / (2u * dem_osr);
+    return k <= 32u ? k : 0u;
 }
 
 // Words a block of n_frames output frames occupies: n_frames x F x
@@ -292,43 +295,26 @@ static inline unsigned i2s_mclk_program_build(uint16_t *prog, unsigned d, unsign
     return len;
 }
 
-// Builds a 50 % square wave on the set pin into prog[I2S_CLOCK_PROGRAM_MAX]
-// (the dual16 DEM clock, on the I2S state machine's divider):
-// per half `set pins`, then for halves over 16 cycles `set y` and a
-// `jmp y--` loop of 8 cycles per pass, the remainder in the delays and a
-// trailing nop, so each half lasts exactly period_cycles / 2 state-machine
-// cycles. No side-set, delays within 3 bits. The pin goes high on the
-// first instruction, so a state machine enabled together with the I2S one
-// (same divider) rises with its frame start. Wrap target 0, wrap at
-// length - 1. Returns the length, 0 if the period is odd or over 560.
-static inline unsigned i2s_clock_program_build(uint16_t *prog, unsigned period_cycles) {
-    if (period_cycles < 2u || period_cycles % 2u != 0)
+// Builds the dual16 DEM program into prog[I2S_CLOCK_PROGRAM_MAX] for the
+// clock state machine running at clk_sys (divider 1): a 50 % square wave of
+// 2 k BCLK periods, each half counting k BCLK periods on the pad (`wait
+// gpio`), so it follows the I2S state machine's divider, trimmed or not.
+// Enabled together with the I2S state machine, DEM rises with the frame
+// start, then every 2 k BCLK periods: every later DEM edge comes a fixed 4
+// clk_sys after a falling BCLK edge (2 of pad synchroniser, the wait, the
+// jmp), so the first high half is 4 cycles longer than the others. Wrap
+// target 0, wrap at length - 1. Returns the length, 0 for k outside 1..32.
+static inline unsigned i2s_dem_program_build(uint16_t *prog, unsigned k, unsigned bclk_gpio) {
+    if (k < 1u || k > 32u)
         return 0;
-    unsigned half = period_cycles / 2u, len = 0;
+    unsigned len = 0;
     for (unsigned level = 2; level-- > 0;) {        // 1 then 0
-        unsigned op = pio_encode_set(pio_pins, level);
-        if (half <= 16u) {
-            unsigned d = half > 8u ? 8u : half;
-            prog[len++] = (uint16_t)(op | pio_encode_delay(d - 1u));
-            if (half > d)
-                prog[len++] = (uint16_t)(pio_encode_nop() | pio_encode_delay(half - d - 1u));
-            continue;
-        }
-        unsigned rest = half - 2u;                  // beyond the two sets' own cycles
-        unsigned passes = rest / 8u > 32u ? 32u : rest / 8u;
-        rest -= passes * 8u;
-        if (rest > 22u)
-            return 0;
-        unsigned d0 = rest > 7u ? 7u : rest;
-        rest -= d0;
-        unsigned d1 = rest > 7u ? 7u : rest;
-        rest -= d1;
-        prog[len++] = (uint16_t)(op | pio_encode_delay(d0));
-        prog[len++] = (uint16_t)(pio_encode_set(pio_y, passes - 1u) | pio_encode_delay(d1));
-        prog[len] = (uint16_t)(pio_encode_jmp_y_dec(len) | pio_encode_delay(7));
-        len++;
-        if (rest)
-            prog[len++] = (uint16_t)(pio_encode_nop() | pio_encode_delay(rest - 1u));
+        prog[len++] = (uint16_t)pio_encode_set(pio_pins, level);
+        prog[len++] = (uint16_t)pio_encode_set(pio_x, k - 1u);
+        unsigned loop = len;
+        prog[len++] = (uint16_t)pio_encode_wait_gpio(true, bclk_gpio);
+        prog[len++] = (uint16_t)pio_encode_wait_gpio(false, bclk_gpio);
+        prog[len++] = (uint16_t)pio_encode_jmp_x_dec(loop);
     }
     return len;
 }

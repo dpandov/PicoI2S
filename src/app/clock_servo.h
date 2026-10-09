@@ -78,7 +78,9 @@ void clock_servo_start(clock_servo_t *s, const clock_servo_params_t *p);
 void clock_servo_resume(clock_servo_t *s, const clock_servo_params_t *p);
 
 // Feeds the FIFO level, every main-loop iteration (it is integrated over
-// time, so irregular calls are fine). Returns true when the trim changed.
+// time, so irregular calls are fine). Returns true when a window closed:
+// the trim is to be applied again (it may be unchanged; the companion's
+// alignment offset rides on every application, spdif_tx.h).
 bool clock_servo_update(clock_servo_t *s, uint32_t fifo_bytes, uint64_t now_us);
 
 // Trim to apply, ppb, positive = faster output.

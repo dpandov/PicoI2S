@@ -11,6 +11,14 @@
 // every format through core 1, de-emphasis first. Format table, timing
 // selection, program generators and converters are in i2s_format.h, the
 // filters in i2s_filter.h.
+//
+// Under a trim the two state machines follow it through separate pacers
+// whose rings round the rate separately (up to about 20 ppb apart), so the
+// DMA here would drift against the S/PDIF fill cadence by up to 6 frames
+// per hour. A slow proportional loop holds it: every live fill adds the
+// distance from the DMA to its target buffer, the main loop turns the
+// window's mean against the first window's into a rate offset for this
+// state machine's pacer (trim_offset_ppb, from spdif_tx_set_trim_ppb()).
 
 #include "i2s/i2s_tx.h"
 
@@ -21,14 +29,12 @@
 #include "hardware/gpio.h"
 #include "hardware/pio.h"
 #include "hardware/sync.h"
-#include "hardware/timer.h"
 #include "pico.h"
 
 #include "board_config.h"
 #include "i2s/i2s_deemph.h"
 #include "i2s/i2s_filter.h"
 #include "i2s/i2s_format.h"
-#include "spdif/spdif_trim.h"
 #include "spdif/spdif_tx.h"
 
 _Static_assert(I2S_DATA_R_PIN == I2S_DATA_PIN + 1, "out pins must be consecutive");
@@ -53,14 +59,24 @@ _Static_assert(I2S_FILTER_MAX_IN == SPDIF_TX_BUFFER_FRAMES, "the filter works in
 // one (the difference in what the two TX FIFOs hold).
 #define GUARD_FRAMES 6u
 
+// Phase lock: offset in ppb per buffer of drift, and its limit. One ppb
+// moves the phase by 1e-9 buffers per buffer played, so at 333..1000
+// buffers per second (32..96 kHz) the time constant is 1e9 / (K x buffers
+// per second): 600..200 s. A constant mismatch m leaves m / K buffers.
+#define PHASE_K_PPB        5000
+#define PHASE_OFFSET_MAX   2000
+// Fills summed between two reads at most (4 s at 96 kHz): the sum of
+// distances below ring_words stays within 32 bits.
+#define PHASE_FILLS_MAX    4096u
+
 static i2s_format_t fmt;
 static i2s_filter_type_t filter_type;   // NOS for the direct formats
 static i2s_format_spec_t spec;      // RAM copy of the format table entry
 static PIO pio;
 static uint sm;
 static uint clk_sm;
-static bool clk_used;               // the clock state machine runs: MCLK (direct) or DEM (dual16)
-static bool clk_dithered;           // DEM: on the I2S divider, trimmed with it; MCLK runs at clk_sys
+static bool clk_used;               // the clock state machine runs: MCLK (direct) or DEM (dual16),
+                                    // at clk_sys, following BCLK
 static uint dma_data;
 static uint dma_ctrl;
 static uint32_t dma_mask;
@@ -124,15 +140,19 @@ static volatile bool core1_busy;
 static volatile uint32_t late_irq;      // interrupt side: direct path skipped, mailbox full
 static volatile uint32_t late_core1;    // core 1: the DMA had reached the target
 
+// Phase lock: the interrupt sums the live fills' distances, the main loop
+// reads them (trim_room starts only).
+static volatile uint32_t phase_sum;
+static volatile uint32_t phase_fills;
+static bool phase_have_ref;             // main loop from here on
+static uint32_t phase_ref;              // first window's mean distance, words x 256
+static int32_t phase_drift;             // DMA lead over the reference, words x 256
+static int32_t phase_offset;            // ppb
+
 // Core 1 only.
 static i2s_deemph_t deemph;
 static i2s_filter_t filter;
 static int32_t filter_out[2u * OUT_FRAMES_MAX];
-
-// Main loop only.
-static uint32_t divider;
-static spdif_trim_t trim;
-static uint32_t trim_reg;
 
 // Next word the data channel reads, as an index into buffers[].
 static __force_inline uint32_t dma_position(void) {
@@ -154,14 +174,14 @@ static __force_inline bool buffer_clear(unsigned target) {
     return dist > 1u || ahead >= guard_words;
 }
 
-// Buffer for the block the S/PDIF side is filling into its buffer b: the
-// one `lag` + 1 after the buffer the DMA reads, with the parity of b + lag
-// (S/PDIF block k is in its buffer k % 2, here in (k + lag) % 4). The
-// parity settles the race at a buffer boundary, where this DMA may be a
-// few words behind the S/PDIF one and still at the end of the previous
-// buffer.
-static __force_inline unsigned live_target(unsigned b) {
-    unsigned target = (dma_position() / words_per_buffer + lag + 1u) & (BUFFERS - 1u);
+// Buffer for the block the S/PDIF side is filling into its buffer b, the
+// DMA at p: the one `lag` + 1 after the buffer the DMA reads, with the
+// parity of b + lag (S/PDIF block k is in its buffer k % 2, here in
+// (k + lag) % 4). The parity settles the race at a buffer boundary, where
+// this DMA may be a few words behind the S/PDIF one and still at the end
+// of the previous buffer.
+static __force_inline unsigned live_target(unsigned b, uint32_t p) {
+    unsigned target = (p / words_per_buffer + lag + 1u) & (BUFFERS - 1u);
     if (((target ^ b ^ lag) & 1u) != 0)
         target = (target + 1u) & (BUFFERS - 1u);
     return target;
@@ -191,7 +211,19 @@ __not_in_flash_func(companion_fill)(unsigned b, const int32_t *pcm, uint32_t n_f
         return;
     if (n_frames > IN_FRAMES)
         n_frames = IN_FRAMES;
-    unsigned target = live ? live_target(b) : next_buffer++ & (BUFFERS - 1u);
+    unsigned target;
+    if (live) {
+        uint32_t p = dma_position();
+        target = live_target(b, p);
+        // Target start ahead of the DMA: grows while this output runs slow.
+        if (trim_room && phase_fills < PHASE_FILLS_MAX) {
+            uint32_t start = target * words_per_buffer;
+            phase_sum += start >= p ? start - p : start + ring_words - p;
+            phase_fills++;
+        }
+    } else {
+        target = next_buffer++ & (BUFFERS - 1u);
+    }
 
     if (via_core1) {
         if (mb_head - mb_tail >= MAILBOX_SLOTS) {
@@ -322,15 +354,16 @@ static bool companion_prepare(uint32_t sample_rate, uint32_t options) {
     program.length = (uint8_t)i2s_program_build(program_instr, &timing, fmt);
     if (clk_used) {
         clk_program.length = (uint8_t)(
-            clk_dithered ? i2s_clock_program_build(clk_instr, i2s_dem_period(&timing, fmt, sample_rate))
-                         : i2s_mclk_program_build(clk_instr, timing.divider, I2S_BCLK_PIN));
+            fmt == I2S_FORMAT_DUAL_16
+                ? i2s_dem_program_build(clk_instr, i2s_dem_half_bclks(&timing, fmt, sample_rate),
+                                        I2S_BCLK_PIN)
+                : i2s_mclk_program_build(clk_instr, timing.divider, I2S_BCLK_PIN));
         if (clk_program.length == 0)
             return false;
     }
     if (!load_programs())
         return false;
 
-    divider = timing.divider;
     filtered = i2s_format_is_dual(fmt) && filter_type != I2S_FILTER_NOS;
     deemph_used = (options & SPDIF_TX_START_EMPHASIS) != 0;
     via_core1 = filtered || deemph_used;
@@ -344,6 +377,11 @@ static bool companion_prepare(uint32_t sample_rate, uint32_t options) {
     // unwritten, and the dual-line frames rely on zeros around the words.
     memset(buffers, 0, ring_words * sizeof(buffers[0]));
     next_buffer = lag;
+    phase_sum = 0;
+    phase_fills = 0;
+    phase_have_ref = false;
+    phase_drift = 0;
+    phase_offset = 0;
     mb_head = 0;
     mb_tail = 0;
     if (filtered)
@@ -366,14 +404,11 @@ static bool companion_prepare(uint32_t sample_rate, uint32_t options) {
         c = pio_get_default_sm_config();
         sm_config_set_wrap(&c, clk_offset, clk_offset + clk_program.length - 1u);
         sm_config_set_set_pins(&c, I2S_CLOCK_PIN, 1);
-        sm_config_set_clkdiv_int_frac8(&c, clk_dithered ? timing.divider : 1u, 0);
+        sm_config_set_clkdiv_int_frac8(&c, 1u, 0);
         pio_sm_init(pio, clk_sm, clk_offset, &c);
     }
     configure_dma();
 
-    uint32_t now = timer_hw->timerawl;
-    spdif_trim_reset(&trim, divider, now);
-    trim_reg = spdif_trim_clkdiv_reg(trim.applied);
     __dmb();
     active = true;
     return true;
@@ -422,32 +457,47 @@ static void companion_stop(void) {
     unload_programs();
 }
 
-static void companion_set_trim_ppb(int32_t ppb) {
-    if (!running)
-        return;
-    uint32_t target = spdif_trim_divider(divider, ppb);
-    // With D = 1 the divider cannot go below 1: no faster than nominal.
-    if (target < 1u << 24)
-        target = 1u << 24;
-    uint32_t now = timer_hw->timerawl;
-    spdif_trim_set_target(&trim, target, now);
+// Only the I2S state machine's divider carries the trim: MCLK and DEM
+// follow BCLK themselves.
+static uint32_t companion_trim_divider(io_rw_32 **reg) {
+    *reg = &pio->sm[sm].clkdiv;
+    return timing.divider;
 }
 
-// Writing CLKDIV while running does not restart the divider, so the bit
-// phase stays continuous. The DEM state machine takes the same value in
-// the same step (dithered on its own it drifts away by the sawtooth; even
-// written back to back it still wanders slowly, which DEM does not mind).
-// MCLK follows BCLK itself and needs no divider writes.
-static void companion_trim_task(void) {
-    if (!running || trim.applied == trim.target)
-        return;
-    uint32_t r = spdif_trim_clkdiv_reg(spdif_trim_dither(&trim, timer_hw->timerawl));
-    if (r != trim_reg) {
-        trim_reg = r;
-        pio->sm[sm].clkdiv = r;
-        if (clk_dithered)
-            pio->sm[clk_sm].clkdiv = r;
+// The window since the last call against the first one: a lead (the
+// distance shrank, this output runs fast) gives a negative offset, a
+// larger divider.
+static int32_t companion_trim_offset_ppb(void) {
+    uint32_t irq = save_and_disable_interrupts();
+    uint32_t sum = phase_sum;
+    uint32_t n = phase_fills;
+    phase_sum = 0;
+    phase_fills = 0;
+    restore_interrupts(irq);
+    if (!running || !trim_room || n == 0)
+        return phase_offset;
+    uint32_t mean = (uint32_t)(((uint64_t)sum << 8) / n);
+    if (!phase_have_ref) {
+        phase_ref = mean;
+        phase_have_ref = true;
+        return phase_offset;
     }
+    // Modulo two buffers: the target's parity is pinned (live_target()),
+    // so a slip moves the distance by two.
+    int32_t span = (int32_t)(2u * words_per_buffer << 8);
+    int32_t lead = (int32_t)(phase_ref - mean);
+    if (lead > span / 2)
+        lead -= span;
+    else if (lead < -span / 2)
+        lead += span;
+    phase_drift = lead;
+    int64_t off = -(int64_t)PHASE_K_PPB * lead / ((int64_t)words_per_buffer << 8);
+    if (off > PHASE_OFFSET_MAX)
+        off = PHASE_OFFSET_MAX;
+    else if (off < -PHASE_OFFSET_MAX)
+        off = -PHASE_OFFSET_MAX;
+    phase_offset = (int32_t)off;
+    return phase_offset;
 }
 
 static const spdif_tx_companion_t companion = {
@@ -455,8 +505,8 @@ static const spdif_tx_companion_t companion = {
     .fill = companion_fill,
     .arm = companion_arm,
     .stop = companion_stop,
-    .set_trim_ppb = companion_set_trim_ppb,
-    .trim_task = companion_trim_task,
+    .trim_divider = companion_trim_divider,
+    .trim_offset_ppb = companion_trim_offset_ppb,
 };
 
 void i2s_tx_init(i2s_format_t format, i2s_filter_type_t filter_sel) {
@@ -465,7 +515,6 @@ void i2s_tx_init(i2s_format_t format, i2s_filter_type_t filter_sel) {
     spec = i2s_format_table[fmt];
     i2s_pack_tables_init(&pack_tables, spec.bits);
     clk_used = fmt == I2S_FORMAT_DUAL_16 || !i2s_format_is_dual(fmt);
-    clk_dithered = fmt == I2S_FORMAT_DUAL_16;
     pio = spdif_tx_pio();
     sm = (uint)pio_claim_unused_sm(pio, true);
     clk_sm = (uint)pio_claim_unused_sm(pio, true);
@@ -522,6 +571,14 @@ unsigned i2s_tx_oversampling(void) {
 
 uint32_t i2s_tx_late(void) {
     return late_irq + late_core1;
+}
+
+int32_t i2s_tx_trim_offset_ppb(void) {
+    return phase_offset;
+}
+
+int32_t i2s_tx_phase_drift_words(void) {
+    return phase_drift / 256;
 }
 
 const char *i2s_format_name(i2s_format_t f) {

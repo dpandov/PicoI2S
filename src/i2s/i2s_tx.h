@@ -6,7 +6,9 @@
 // to i2s_tx through the spdif_tx companion interface (spdif_tx.h), the
 // state machines are enabled in one write and consume one input frame per
 // the same number of clk_sys cycles, so the two outputs carry the same
-// samples and stop together. The trim (UAC1 mode) is applied to both.
+// samples and stop together. The trim (UAC1 mode, the S/PDIF input) is
+// applied to both, with a slow phase lock of this output's DMA to the
+// S/PDIF fill cadence on top.
 //
 // I2S, left- and right-justified go out at the sample rate, converted in
 // the interrupt. The dual-line formats (multibit DACs) take one of five
@@ -22,8 +24,8 @@
 // clk_sys and restarted on every BCLK edge read back from the pad, so it
 // stays locked to BCLK under the trim; in dual16 (TDA1541A) the DEM
 // clock, a 50 % square wave at the oversampled word rate (8x Fs below
-// 50 kHz, 4x above) with every filter, NOS included, on the I2S state
-// machine's divider and trim. The pin is low in the other dual-line
+// 50 kHz, 4x above) with every filter, NOS included, likewise at clk_sys
+// counting BCLK periods on the pad. The pin is low in the other dual-line
 // formats.
 //
 // Timing (i2s_format.h): an output frame is F BCLK slots of N state
@@ -117,6 +119,14 @@ unsigned i2s_tx_oversampling(void);
 // buffer before they were written (the buffer then went out again with
 // its previous content), or the mailbox to core 1 was full. Never reset.
 uint32_t i2s_tx_late(void);
+
+// Phase lock of a trimmed output (main loop): the last rate offset applied
+// to this output's state machine against the common trim, in ppb
+// (positive = faster), and the last measured lead of its DMA over the
+// start's alignment, in words (positive = early). 0 until the second
+// window after a start, and while untrimmed.
+int32_t i2s_tx_trim_offset_ppb(void);
+int32_t i2s_tx_phase_drift_words(void);
 
 // Core 1: filters and packs at most one pending block of the filtered
 // path per call, returns at once when there is none. Call from the core-1 loop; cooperative with other core-1
