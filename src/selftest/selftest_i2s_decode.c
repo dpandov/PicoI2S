@@ -5,9 +5,9 @@
 // search restarts at the next edge. The word is the F/2 samples from the
 // edge (left-justified), the F/2 after it (I2S), or the last 24 / 16 of
 // the half (right-justified). Dual-line: a LATCH pulse (the level the line
-// holds least, one sample wide) marks slot latch_slot of a frame; the word
-// is the `width` samples ending at the frame's LSB slot, and the next
-// pulse must come F samples later.
+// holds least, latch_slots samples wide) starts at slot latch_slot of a
+// frame; the word is the `width` samples ending at the frame's LSB slot,
+// and the next pulse must come F samples later.
 //
 // Passes: a scan (BCLK must be low in every sample, LATCH polarity), the
 // framing into the frame buffer, then the check of the frames against the
@@ -48,13 +48,13 @@ enum {
 
 unsigned selftest_i2s_format_width(i2s_format_t f) {
     switch (f) {
-    case I2S_FORMAT_RIGHT_JUSTIFIED_24: return 24u;
-    case I2S_FORMAT_RIGHT_JUSTIFIED_16: return 16u;
-    case I2S_FORMAT_DUAL_16:            return 16u;
-    case I2S_FORMAT_DUAL_18:            return 18u;
-    case I2S_FORMAT_DUAL_20:            return 20u;
-    case I2S_FORMAT_DUAL_24:            return 24u;
-    default:                            return 32u;
+    case I2S_FORMAT_RIGHT_JUSTIFIED: return I2S_RJ_BITS;
+    case I2S_FORMAT_TDA1541A:        return 16u;
+    case I2S_FORMAT_DUAL_16:         return 16u;
+    case I2S_FORMAT_DUAL_18:         return 18u;
+    case I2S_FORMAT_DUAL_20:         return 20u;
+    case I2S_FORMAT_DUAL_24:         return 24u;
+    default:                         return 32u;
     }
 }
 
@@ -209,7 +209,7 @@ static bool DECODE_FUNC(latch_pass)(selftest_i2s_decoder_t *d, uint32_t *budget)
         if (line(d, i) != d->idle) {
             return false;
         }
-        if (i - d->pulse != 1u) {
+        if (i - d->pulse != d->lay.latch_slots) {
             d->r->err_frame++;
         }
         // The frame starts latch_slot slots before the pulse; its word
@@ -438,7 +438,13 @@ bool DECODE_FUNC(selftest_i2s_decode_step)(selftest_i2s_decoder_t *d, uint32_t b
         d->resync = true;
         if (dual) {
             d->idle = d->ones > d->n / 2u ? 1u : 0u;
-            d->i = 0;
+            // A pulse already running when the capture began is cut
+            // short: start after it.
+            uint32_t i = 0;
+            while (i < d->n && line(d, i) != d->idle) {
+                i++;
+            }
+            d->i = i < d->lay.latch_slots ? i : 0u;
             d->phase = PH_LATCH_SEARCH;
         } else {
             d->i = 1;

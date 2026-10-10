@@ -81,8 +81,8 @@ A third hidden string (index 0x24, printed by this script and by
 tools/monitor.py) carries the configuration, fixed at boot:
 
     board=<rp2350-one|pico2> fw=<bcdDevice hex> build=<normal|selftest|tone|
-        tone+selftest> mode=<uac2|uac1> format=<i2s|lj|rj24|rj16|dual16|
-        dual18|dual20|dual24> filter=<nos|sharp|slow|sinc|minphase>
+        tone+selftest> mode=<uac2|uac1> format=<i2s|lj|rj16|rj24|tda1541a|
+        dual16|dual18|dual20|dual24> filter=<nos|sharp|slow|sinc|minphase>
         jumpers=<GP5>/<GP8 GP7 GP6>/<GP2 GP3 GP4>
 
     filter is what the filter jumpers select (reserved codes: sharp), also

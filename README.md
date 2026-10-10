@@ -85,7 +85,7 @@ after the audio).
 | DR | GP15 | GP17 (pin 22) | dual-line modes only |
 | BCLK | GP26 | GP18 (pin 24) | |
 | LRCK (LATCH in the dual-line modes) | GP27 | GP19 (pin 25) | |
-| MCLK / DEM | GP28 | GP20 (pin 26) | 256 Fs MCLK in the I2S / LJ / RJ formats; TDA1541A DEM clock in dual-line 16; low in the other dual-line formats |
+| MCLK / DEM | GP28 | GP20 (pin 26) | 256 Fs MCLK in the I2S / LJ / RJ formats; DEM clock in the TDA1541A format; low in the dual-line formats |
 | GND | top of the same row | pins 23, 28 | |
 
 On the RP2350-One the five signals sit in the row that starts with 5V, GND
@@ -99,12 +99,18 @@ a grounded pin is a 1:
 |---|---|---|---|
 | open | open | open | I2S (Philips), 32-bit slots, MSB one BCLK after the LRCK edge |
 | open | open | gnd | Left-justified |
-| open | gnd | open | Right-justified, 24-bit |
-| open | gnd | gnd | Right-justified, 16-bit |
-| gnd | open | open | Dual-line, 16-bit (TDA1541A simultaneous mode) |
-| gnd | open | gnd | Dual-line, 18-bit (AD1865) |
-| gnd | gnd | open | Dual-line, 20-bit (PCM63, PCM1702 pairs) |
-| gnd | gnd | gnd | Dual-line, 24-bit |
+| open | gnd | open | Right-justified, 16-bit (24-bit with the `USB2SPDIF_RJ24` build option) |
+| open | gnd | gnd | TDA1541A simultaneous mode, 16-bit |
+| gnd | open | open | Dual-line, 16-bit (PCM56) |
+| gnd | open | gnd | Dual-line, 18-bit (AD1865, AD1860 / AD1861) |
+| gnd | gnd | open | Dual-line, 20-bit (AD1862, PCM63, PCM1702) |
+| gnd | gnd | gnd | Dual-line, 24-bit (PCM1704) |
+
+The fifth pin carries MCLK in the I2S, left- and right-justified formats
+and the DEM clock in the TDA1541A format; in the dual-line formats it
+stays low. The right-justified word length is fixed per build: 16 bits
+by default (PT8211-type DACs and the classic Japanese format), 24 bits
+when built with `-DUSB2SPDIF_RJ24=ON`.
 
 Three more jumpers, GPIO 2, 3 and 4 (Pico 2: pins 4, 5, 6, GND on pins 3
 and 8), select the filter of the dual-line formats (see
@@ -147,19 +153,29 @@ bits of its samples (truncated, no dither; the volume control is applied
 before). Tie the DAC's left and right latch inputs together where it has
 two (AD1865 LL and LR).
 
-- AD1865, PCM63, PCM1702 (two's complement): the LSB sits in the last
-  BCLK slot of the frame; LATCH is high through that slot (one BCLK
-  period) and falls half a period after the rising edge that clocked the
-  LSB, so the LSB is the last bit in before the latch. Leading slots carry
+- Dual-line 16 / 18 / 20 / 24 (two's complement; PCM56, AD1865, AD1860 /
+  AD1861, AD1862, PCM63, PCM1702, PCM1704): the LSB sits in the last
+  BCLK slot of the frame; LATCH rises three BCLK periods before the end
+  of the frame (only its falling edge matters, and three periods are more
+  than any of these DACs asks for) and falls shortly after the BCLK
+  falling edge that starts the next frame, one PIO cycle into its low
+  half, before the rising edge that clocks the next MSB, so the LSB is
+  the last bit in before the latch. Leading slots carry
   zeros (the AD1865 keeps the last 18 bits before LATCH; the PCM63 /
-  PCM1702 accept leading bits).
+  PCM1702 / PCM1704 accept leading bits). The word length must match the
+  DAC exactly: a DAC keeps the last bits it shifted in, so a longer word
+  loses its top bits (an AD1865 in dual-line 20 plays 12 dB too loud and
+  wraps around above -12 dBFS). From the LSB's clock edge to the falling
+  LATCH edge there are at least 78 ns at every rate and in both modes
+  (the AD1860 asks for 60 ns, the AD1865 for 40), and from the falling
+  edge to the next rising BCLK edge at least 26 ns (15 ns asked).
 - TDA1541A in simultaneous mode (offset binary, no clock edge allowed
   while LE is high): 16 data slots per frame, the LSB in the last one; the
   LE pulse fills the BCLK-low half of the first slot of the next frame, so
   it rises with the falling edge after the LSB and falls with the rising
   edge that clocks the next MSB. BCLK stays at or below 6.144 MHz,
   within the chip's 6.4 MHz limit.
-- DEM clock (dual-line 16 only): a 50 % square wave at the oversampled
+- DEM clock (TDA1541A format only): a 50 % square wave at the oversampled
   word rate with every filter, NOS included: 256 / 352.8 / 384 kHz at
   32 / 44.1 / 48 kHz and 352.8 / 384 kHz at 88.2 / 96 kHz. With NOS and
   the sinc compensation, which run at the sample rate, that is BCLK / 2
@@ -199,7 +215,7 @@ without core 1 and adds no delay.
 response at any sample rate (see [tools/README.md](tools/README.md)).
 
 BCLK is the number of slots per frame times the output word rate. Slots
-per frame: 16 for dual-line 16; for the other dual-line formats the
+per frame: 16 for dual-line 16 and the TDA1541A; for the other dual-line formats the
 smallest count at or above the word length that divides the clock cycles
 per frame (18 to 25); 64 for I2S / LJ / RJ. In UAC2 mode, with an oversampling
 filter:
@@ -207,7 +223,7 @@ filter:
 | Format | 32 kHz | 44.1 kHz | 48 kHz | 88.2 kHz | 96 kHz |
 |---|---|---|---|---|---|
 | Output word rate (dual-line, oversampled) | 256 kHz | 352.8 kHz | 384 kHz | 352.8 kHz | 384 kHz |
-| Dual-line 16 (16 slots) | 4.096 MHz | 5.645 MHz | 6.144 MHz | 5.645 MHz | 6.144 MHz |
+| Dual-line 16 and TDA1541A (16 slots) | 4.096 MHz | 5.645 MHz | 6.144 MHz | 5.645 MHz | 6.144 MHz |
 | Dual-line 18 | 5.12 MHz (20) | 6.35 MHz (18) | 7.68 MHz (20) | 6.35 MHz (18) | 9.216 MHz (24) |
 | Dual-line 20 | 5.12 MHz (20) | 8.467 MHz (24) | 7.68 MHz (20) | 8.467 MHz (24) | 9.216 MHz (24) |
 | Dual-line 24 | 6.4 MHz (25) | 8.467 MHz (24) | 9.6 MHz (25) | 8.467 MHz (24) | 9.216 MHz (24) |
@@ -218,7 +234,7 @@ differ in UAC1 mode: at 32 kHz dual-line 18 uses 18 slots (4.608 MHz),
 dual-line 20 and 24 use 24 (6.144 MHz); at every other rate all three
 use 24 (8.467 MHz in the 44.1 kHz family, 9.216 MHz in the 48 kHz one). With NOS and the sinc
 compensation the slot counts stay and the output word rate is the sample
-rate, so BCLK is 8 or 4 times lower (dual-line 16: 16 x Fs).
+rate, so BCLK is 8 or 4 times lower (dual-line 16 and TDA1541A: 16 x Fs).
 
 Limitations: the filters and the DEM clock exist for the dual-line formats
 only, MCLK for the direct formats only. In UAC1 mode and with the S/PDIF
@@ -484,6 +500,9 @@ To check the wiring and a receiver without a USB host, build with
 `-DUSB2SPDIF_TEST_TONE=ON`: the output then carries a 1 kHz tone at -18 dBFS
 (48 kHz / 24-bit) from power-up.
 
+`-DUSB2SPDIF_RJ24=ON` turns format jumper code 010 from right-justified
+16-bit into right-justified 24-bit, for DACs that take only that format.
+
 ## Flashing
 
 First time: hold BOOT while plugging in the board, then copy
@@ -529,7 +548,7 @@ one timestamped line per event:
 16:54:45 device connected: UAC2, non-Apple host, boot 3
 16:54:45   config: board Waveshare RP2350-One, firmware 1.03, normal build
 16:54:45   config: USB UAC2 (mode jumper GP5 open)
-16:54:45   config: output format dual-line 16-bit (TDA1541A simultaneous mode), DEM clock on (jumpers GP8 GP7 GP6 = 100)
+16:54:45   config: output format TDA1541A simultaneous mode 16-bit, DEM clock on (jumpers GP8 GP7 GP6 = 011)
 16:54:45   config: filter sharp, linear phase, 8x at 32 / 44.1 / 48 kHz, 4x at 88.2 / 96 kHz (jumpers GP2 GP3 GP4 = 001)
 16:54:52 stream opened: 48000 Hz / 24-bit (2.304 Mbit/s), volume 0 dB
 16:54:52 playing

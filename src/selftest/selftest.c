@@ -72,25 +72,26 @@ _Static_assert(MAX_FRAMES * 128u <= SELFTEST_DECODE_MAX_CELLS, "window exceeds t
 // One sample per BCLK slot of W = 8 (Pico 2: GP16..23) or 16 (RP2350-One:
 // GP14..29) pins from I2S_DATA_PIN, 32 / W per word; 20 KB of buffer hold
 // 20480 or 10240 slots: 320 / 160 frames of the direct formats, 20480 / F
-// (10240 / F) output frames of the dual-line formats (1280 / 640 for
-// dual16, F = 16).
+// (10240 / F) output frames of the dual-line formats (1280 / 640 at
+// F = 16).
 #define I2S_SAMPLE_BITS ((I2S_LRCK_PIN - I2S_DATA_PIN) < 8u ? 8u : 16u)
 #define I2S_CLK_BIT     (I2S_BCLK_PIN - I2S_DATA_PIN)
 #define I2S_WORDS       5120u                                            // 20 KB
 #define I2S_SAMPLES     (I2S_WORDS * 32u / I2S_SAMPLE_BITS)
-#define I2S_MAX_FRAMES  (I2S_SAMPLES / 16u)                              // dual16 frames
+#define I2S_MAX_FRAMES  (I2S_SAMPLES / 16u)                              // frames at F = 16
 
 // The capture program: wait 1 pin b; wait 0 pin b; in pins, W (b = the
 // BCLK index above the IN base). It samples right after every BCLK
 // falling edge, where the transmitter changes the data and the LRCK /
 // LATCH line: the sample holds the slot's data (stable until the DAC
 // clocks it on the rising edge) and the line level of the slot's BCLK-low
-// half, which is where the dual16 (TDA1541A) LATCH pulse lives; the other
-// dual-line formats hold LATCH through both halves of their LATCH slot,
-// so one sample per slot frames both styles. The wait sees the edge two
-// cycles late (input synchroniser) and the in executes one cycle after,
-// so the loop needs N x D >= 4 clk_sys cycles per slot and a BCLK-low half
-// of at least 2; the transmitter's smallest timing is N x D = 9 with a
+// half, which is where the TDA1541A LATCH pulse lives; the other
+// dual-line formats hold LATCH through both halves of their LATCH slots
+// and into slot 0's low half (one more sample), so one sample per slot
+// frames both styles. The wait sees the edge two cycles late (input
+// synchroniser) and the in executes one cycle after (so it reads the pins
+// as they were one cycle after the edge), so the loop needs N x D >= 4
+// clk_sys cycles per slot and a BCLK-low half of at least 2; the transmitter's smallest timing is N x D = 9 with a
 // 4-cycle low half (i2s/i2s_format.h). The pins are only read, never
 // claimed.
 #define I2S_CAPTURE_LEN     3u
@@ -379,6 +380,9 @@ static bool i2s_layout(selftest_i2s_layout_t *lay, i2s_format_t f, uint32_t dtx,
     lay->slots = t.slots;
     lay->lsb_slot = t.lsb_slot;
     lay->latch_slot = t.latch_slot;
+    // The sample after slot 0's falling BCLK edge shows the pin one clk_sys
+    // after it, so it holds a LATCH tail of 2 clk_sys or more as well.
+    lay->latch_slots = (uint8_t)(t.latch_slots + (t.latch_tail * t.divider >= 2u ? 1u : 0u));
     lay->offset_binary = i2s_format_is_dual(f) && i2s_format_table[f].offset_binary;
     return true;
 }

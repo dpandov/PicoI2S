@@ -93,12 +93,13 @@ BOARDS = {"rp2350-one": "Waveshare RP2350-One", "pico2": "Raspberry Pi Pico 2"}
 BUILDS = {"normal": "normal build", "selftest": "self-test build", "tone": "test-tone build",
           "tone+selftest": "test-tone + self-test build"}
 FORMATS = {
-    "i2s": "I2S (Philips)", "lj": "left-justified", "rj24": "right-justified 24-bit",
-    "rj16": "right-justified 16-bit",
-    "dual16": "dual-line 16-bit (TDA1541A simultaneous mode), DEM clock on",
-    "dual18": "dual-line 18-bit (AD1865)", "dual20": "dual-line 20-bit (PCM63 / PCM1702)",
-    "dual24": "dual-line 24-bit",
+    "i2s": "I2S (Philips), MCLK on", "lj": "left-justified, MCLK on",
+    "rj16": "right-justified 16-bit, MCLK on", "rj24": "right-justified 24-bit, MCLK on",
+    "tda1541a": "TDA1541A simultaneous mode 16-bit, DEM clock on",
+    "dual16": "dual-line 16-bit (PCM56)", "dual18": "dual-line 18-bit (AD1865, AD1860 / AD1861)",
+    "dual20": "dual-line 20-bit (AD1862, PCM63, PCM1702)", "dual24": "dual-line 24-bit (PCM1704)",
 }
+DUAL_FORMATS = ("tda1541a", "dual16", "dual18", "dual20", "dual24")
 FILTERS = {
     "nos": "NOS, no digital filter",
     "sharp": "sharp, linear phase, 8x at 32 / 44.1 / 48 kHz, 4x at 88.2 / 96 kHz",
@@ -124,7 +125,7 @@ def config_lines(cfg):
     ]
     code = int(flt_j, 2) if set(flt_j) <= {"0", "1"} and flt_j else None
     reserved = code is not None and code >= len(FILTER_CODES)
-    if fmt.startswith("dual"):
+    if fmt in DUAL_FORMATS:
         lines.append(f"filter {FILTERS.get(flt, flt)} (jumpers GP2 GP3 GP4 = {flt_j}"
                      f"{', a reserved code' if reserved else ''})")
     else:

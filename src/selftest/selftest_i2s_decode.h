@@ -35,7 +35,8 @@ typedef struct {
                             // 24 / 16 (rj), or the dual-line word length
     uint8_t  slots;         // F: BCLK slots per frame (64 for the LRCK formats)
     uint8_t  lsb_slot;      // dual-line: slot of the LSB
-    uint8_t  latch_slot;    // dual-line: slot where LATCH is sampled high (0 or F - 1)
+    uint8_t  latch_slot;    // dual-line: first slot where LATCH is sampled high
+    uint8_t  latch_slots;   // dual-line: LATCH pulse length in slots
     bool     offset_binary; // dual-line: MSB inverted on the line
 } selftest_i2s_layout_t;
 

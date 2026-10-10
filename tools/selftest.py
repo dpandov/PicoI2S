@@ -50,10 +50,10 @@ silent frames, no sample errors, no framing errors) in the expected format
 the expected filter (--i2s-filter, default: the filter the device reports
 at the start) at its oversampling for the rate (sharp, slow, minphase: 8
 below 50 kHz, 4 above), and no bad, gap or skipped windows and no late
-filter blocks (L) were added. The direct formats (i2s, lj, rj24, rj16) and
-the dual-line formats with the nos filter are checked against the pattern
-(a format narrower than the stream, rj16 or dual16 .. dual20 at 24 bit, at
-its own width); the filtered dual-line formats (sharp, slow, minphase, and
+filter blocks (L) were added. The direct formats (i2s, lj, rj16 or rj24)
+and the dual-line formats with the nos filter are checked against the
+pattern (a format narrower than the stream, rj16, tda1541a or dual16 ..
+dual20 at 24 bit, at its own width); the filtered dual-line formats (sharp, slow, minphase, and
 sinc at the sample rate) are checked bit-exact against the window's own
 S/PDIF samples run through the transmitter's filter on the device, so no
 host-side model is involved. The sweep prints the filter token (sharp8,
@@ -101,7 +101,8 @@ I2S report (same header, USB string 0x22, same seq as the S/PDIF window):
         e<framing> L<late> B<bad> G<gaps> K<skipped>
         [@<frame>:<prev or expected L>><L>/<R>]
 
-    fmt     jumper format: i2s, lj, rj24, rj16, dual16, dual18, dual20, dual24
+    fmt     jumper format: i2s, lj, rj16 (rj24 with the USB2SPDIF_RJ24 build),
+            tda1541a, dual16, dual18, dual20, dual24
     flt     dual-line filter (jumpers): sharp, slow or minphase with the
             oversampling of the running output appended (sharp8, slow4, ...;
             the bare name while stopped), sinc, nos; - for the direct formats
@@ -143,7 +144,8 @@ PLAYER_EXE = os.path.join(HERE, "build", "wasapi_play.exe")
 
 STRID_SELFTEST = 0x21
 STRID_SELFTEST_I2S = 0x22
-I2S_FORMATS = ("i2s", "lj", "rj24", "rj16", "dual16", "dual18", "dual20", "dual24")
+I2S_FORMATS = ("i2s", "lj", "rj16", "rj24", "tda1541a", "dual16", "dual18", "dual20", "dual24")
+DUAL_FORMATS = ("tda1541a", "dual16", "dual18", "dual20", "dual24")
 I2S_FILTERS = ("sharp", "nos", "slow", "minphase", "sinc")
 I2S_OVERSAMPLING_FILTERS = ("sharp", "slow", "minphase")
 # Filter token: an oversampling filter with the running output's
@@ -727,7 +729,7 @@ def run_sweep(rd, exe, args, boots, uac1, i2s_fmt, i2s_filter=None):
 def run_soak(rd, exe, args, boots, i2s_fmt, i2s_filter=None):
     rate, bits = args.rate, args.bits
     seconds = args.soak * 60.0
-    flt = f" {i2s_filter}" if i2s_filter and i2s_fmt.startswith("dual") else ""
+    flt = f" {i2s_filter}" if i2s_filter and i2s_fmt in DUAL_FORMATS else ""
     print(f"soak: {rate} Hz {bits}-bit, I2S {i2s_fmt}{flt}, for {args.soak:g} min, reading every "
           f"{args.interval:g} s")
     player = make_player(exe, rate, bits, SOAK_WARMUP + seconds + SOAK_MARGIN, args.device)

@@ -90,7 +90,7 @@ python tools/selftest.py --i2s-filter slow      require this dual-line filter (j
 | `--rate HZ`, `--bits 16\|24` | soak format (default 48000 / 24; 16 in UAC1 mode) |
 | `--interval S` | soak read interval (default 5 s) |
 | `--device NAME` | playback device name part (Windows endpoint, Linux card; default: the bridge in either mode) |
-| `--i2s-format FMT` | expected I2S format: i2s, lj, rj24, rj16, dual16, dual18, dual20, dual24 (default: what the device reports) |
+| `--i2s-format FMT` | expected I2S format: i2s, lj, rj16 (rj24 with the `USB2SPDIF_RJ24` build), tda1541a, dual16, dual18, dual20, dual24 (default: what the device reports) |
 | `--i2s-filter NAME` | expected dual-line filter: sharp, slow, minphase, sinc, nos (default: what the device reports) |
 | `--status` | print the diagnostic, S/PDIF and I2S reports once and exit |
 | `-v`, `--verbose` | print every read |
@@ -117,9 +117,9 @@ late-interrupt counters (`ur`, `ov`, `lt`) did not increase.
 sample or framing errors, and no bad, gap, skipped or late (`L`) counts
 were added. The filter must run at its oversampling for the rate: sharp,
 slow and minphase 8x below 50 kHz, 4x above. How the samples are checked:
-- the direct formats (i2s, lj, rj24, rj16) and dual-line with nos: against
+- the direct formats (i2s, lj, rj16 or rj24) and dual-line with nos: against
   the pattern, at the format's own width when it is narrower than the
-  stream (rj16, or dual16 .. dual20 at 24 bit);
+  stream (rj16, tda1541a, or dual16 .. dual20 at 24 bit);
 - the filtered dual-line formats (sharp, slow, minphase, and sinc at the
   sample rate): bit-exact against the window's own S/PDIF samples run
   through the same filter on the device, so no host-side model is
@@ -177,7 +177,7 @@ e.g. #812 ok i2s - tx48000/24 f320 z0 s0 e0 L0 B0 G0 K1
 
 | Field | Meaning |
 |---|---|
-| fmt | jumper format: `i2s`, `lj`, `rj24`, `rj16`, `dual16`, `dual18`, `dual20`, `dual24` |
+| fmt | jumper format: `i2s`, `lj`, `rj16` (`rj24` with the `USB2SPDIF_RJ24` build), `tda1541a`, `dual16`, `dual18`, `dual20`, `dual24` |
 | flt | dual-line filter (jumpers): `sharp`, `slow` or `minphase` with the oversampling of the running output appended (`sharp8`, `slow4`, ...; the bare name while stopped), `sinc`, `nos`; `-` for the direct formats |
 | state | `ok`, `sil`, `idle` (stopped, pins low), `wait`; failures: `ERR`, `NOSYNC` (LRCK static / no LATCH), `NOCLK` (no BCLK edges), `NOTIM` (no timing for the format at this rate), `OFF` (S/PDIF runs, I2S does not), `PINHI` (stopped, a pin high: `lvl<hex>` = DATA, DR, BCLK, LRCK in bits 0..3), `NOPIO` |
 | `s` | pattern violations (direct, nos) or frames differing from the filtered S/PDIF reference (sharp, slow, minphase, sinc); `-` when no sample check ran |
@@ -220,7 +220,7 @@ python tools/monitor.py --silence 2 --interval 0.5
 16:54:45 device connected: UAC2, non-Apple host, boot 3
 16:54:45   config: board Waveshare RP2350-One, firmware 1.03, normal build
 16:54:45   config: USB UAC2 (mode jumper GP5 open)
-16:54:45   config: output format dual-line 16-bit (TDA1541A simultaneous mode), DEM clock on (jumpers GP8 GP7 GP6 = 100)
+16:54:45   config: output format TDA1541A simultaneous mode 16-bit, DEM clock on (jumpers GP8 GP7 GP6 = 011)
 16:54:45   config: filter sharp, linear phase, 8x at 32 / 44.1 / 48 kHz, 4x at 88.2 / 96 kHz (jumpers GP2 GP3 GP4 = 001)
 16:54:52 stream opened: 48000 Hz / 24-bit (2.304 Mbit/s), volume 0 dB
 16:54:52 playing
@@ -354,7 +354,7 @@ and by `monitor.py` on connect) is fixed at boot:
 
 ```
 board=<rp2350-one|pico2> fw=<bcdDevice> build=<normal|selftest|tone|tone+selftest>
-    mode=<uac2|uac1> format=<i2s|lj|rj24|rj16|dual16|dual18|dual20|dual24>
+    mode=<uac2|uac1> format=<i2s|lj|rj16|rj24|tda1541a|dual16|dual18|dual20|dual24>
     filter=<nos|sharp|slow|sinc|minphase> jumpers=<GP5>/<GP8 GP7 GP6>/<GP2 GP3 GP4>
 
 e.g. board=rp2350-one fw=0103 build=normal mode=uac2 format=i2s filter=nos jumpers=0/000/000

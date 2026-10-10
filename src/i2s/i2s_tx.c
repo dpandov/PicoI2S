@@ -75,7 +75,7 @@ static i2s_format_spec_t spec;      // RAM copy of the format table entry
 static PIO pio;
 static uint sm;
 static uint clk_sm;
-static bool clk_used;               // the clock state machine runs: MCLK (direct) or DEM (dual16),
+static bool clk_used;               // the clock state machine runs: MCLK (direct) or DEM (TDA1541A),
                                     // at clk_sys, following BCLK
 static uint dma_data;
 static uint dma_ctrl;
@@ -354,7 +354,7 @@ static bool companion_prepare(uint32_t sample_rate, uint32_t options) {
     program.length = (uint8_t)i2s_program_build(program_instr, &timing, fmt);
     if (clk_used) {
         clk_program.length = (uint8_t)(
-            fmt == I2S_FORMAT_DUAL_16
+            fmt == I2S_FORMAT_TDA1541A
                 ? i2s_dem_program_build(clk_instr, i2s_dem_half_bclks(&timing, fmt, sample_rate),
                                         I2S_BCLK_PIN)
                 : i2s_mclk_program_build(clk_instr, timing.divider, I2S_BCLK_PIN));
@@ -514,7 +514,7 @@ void i2s_tx_init(i2s_format_t format, i2s_filter_type_t filter_sel) {
     filter_type = i2s_format_is_dual(fmt) ? i2s_filter_from_code(filter_sel) : I2S_FILTER_NOS;
     spec = i2s_format_table[fmt];
     i2s_pack_tables_init(&pack_tables, spec.bits);
-    clk_used = fmt == I2S_FORMAT_DUAL_16 || !i2s_format_is_dual(fmt);
+    clk_used = fmt == I2S_FORMAT_TDA1541A || !i2s_format_is_dual(fmt);
     pio = spdif_tx_pio();
     sm = (uint)pio_claim_unused_sm(pio, true);
     clk_sm = (uint)pio_claim_unused_sm(pio, true);
@@ -583,7 +583,8 @@ int32_t i2s_tx_phase_drift_words(void) {
 
 const char *i2s_format_name(i2s_format_t f) {
     static const char *const names[I2S_FORMAT_COUNT] = {
-        "i2s", "lj", "rj24", "rj16", "dual16", "dual18", "dual20", "dual24",
+        "i2s", "lj", I2S_RJ_BITS == 24u ? "rj24" : "rj16", "tda1541a",
+        "dual16", "dual18", "dual20", "dual24",
     };
     return f < I2S_FORMAT_COUNT ? names[f] : "?";
 }

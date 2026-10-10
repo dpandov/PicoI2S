@@ -30,12 +30,23 @@
 #define I2S_DIRECT_SLOTS      64u   // I2S / LJ / RJ: two 32-bit slots per frame
 #define I2S_DIRECT_LOOP_SLOTS 31u   // loop slots per half; the 32nd is the special one
 // Dual-line frames: at most 32 slots, so a frame is at most two words and
-// the loop reload (F - 2) fits set's 5-bit immediate.
+// the loop reload (at most F - 2) fits set's 5-bit immediate.
 #define I2S_DUAL_SLOTS_MAX    32u
+// Dual16 .. dual24: LATCH rises with the slot I2S_LATCH_SLOTS before the
+// end of the frame and falls I2S_LATCH_TAIL state-machine cycles into the
+// BCLK-low half of the next frame's slot 0. Only the falling edge matters
+// to the DACs: three periods are more than any of them asks for, and the
+// tail moves the edge away from both BCLK edges around it (see the
+// datasheet notes below).
+#define I2S_LATCH_SLOTS       3u
+#define I2S_LATCH_TAIL        1u
+_Static_assert(I2S_LATCH_SLOTS >= 1u && I2S_LATCH_SLOTS <= 3u, "program groups");
 // Each half slot is ceil(half / 8) instructions (3-bit delay beside two
-// side-set bits); N <= 16 gives 2 instructions per slot: 8 for the four
-// direct groups, 4 for the two dual-line ones. 16 holds N <= 32 (direct)
-// and N <= 64 (dual-line).
+// side-set bits); N <= 16 gives 2 instructions per slot, 3 for the dual16
+// .. dual24 slot 0 (its LATCH tail): 8 for the four direct groups, 11 for
+// dual16 .. dual24 (slot 0, the loop, three LATCH slots), 4 for the
+// TDA1541A. 16 holds N <= 32 for the direct formats, N <= 20 or so for
+// dual16 .. dual24 and N <= 64 for the TDA1541A.
 #define I2S_PROGRAM_MAX       16u
 #define I2S_CLOCK_PROGRAM_MAX 10u
 
@@ -49,14 +60,17 @@ typedef struct {
     uint8_t out_pins;       // data pins driven by out: 1, or 2 (DL, DR)
     // LRCK / LATCH level per half slot (bit 0 = BCLK-low half, bit 1 =
     // BCLK-high half) for each instruction group, in program order:
-    // direct formats L loop, L last, R loop, R last; dual18 / 20 / 24
-    // loop, LATCH slot; dual16 LATCH slot, loop.
+    // direct formats L loop, L last, R loop, R last; dual16 .. dual24
+    // loop, LATCH slots (slot 0 with its tail is built in); TDA1541A LATCH
+    // slot, loop.
     uint8_t line[4];
     uint8_t conv;           // i2s_conv_t
     uint8_t shift;          // SHIFT: bits
     uint8_t bits;           // DUAL: DAC word length
-    bool    latch_first;    // DUAL: LATCH pulse in the BCLK-low half of slot 0; else
-                            // LATCH high through slot F-1 (the LSB is in slot F-1 either way)
+    bool    latch_first;    // DUAL: LATCH pulse in the BCLK-low half of slot 0 (TDA1541A);
+                            // else LATCH high from slot F-3 into slot 0 of the next frame
+                            // (I2S_LATCH_SLOTS, I2S_LATCH_TAIL; the LSB is in slot F-1
+                            // either way)
     bool    offset_binary;  // DUAL: MSB inverted
 } i2s_format_spec_t;
 
@@ -74,26 +88,45 @@ typedef struct {
 //   edge that ends the LSB slot and falls with the rising edge that clocks
 //   the next MSB (floor(N / 2) x D clk_sys cycles: 65 ns at the shortest,
 //   48 kHz on the 153.6 MHz clock).
+// - PCM56: 16 bits BTC MSB first, rising CLK edge (<= 10 MHz); LE high
+//   for >= 1 clock cycle before going low and low for >= 1 cycle after.
 // - AD1865: 18 bits two's complement MSB first, clocked on the rising CLK
 //   edge (<= 13.5 MHz); the falling LL / LR edge loads "the 18 most recent
 //   bits" into the DAC; figure 9 wants >= 30-40 ns between the edges. LL
-//   and LR may be tied together.
+//   and LR may be tied together. AD1861 (18 bits) and AD1862 (20 bits,
+//   <= 17 MHz): the same, a low-going LE updates the DAC.
 // - PCM63 / PCM1702: 20 bits BTC MSB first, rising CLK edge, "any number of
 //   bits can precede the 20"; transfer on the falling LE edge, LE high for
 //   >= 1 clock cycle before it and low for >= 1 cycle after.
-// - AD1865, PCM63 / PCM1702 and the generic 24-bit mode: LSB in slot F-1,
-//   LATCH high for that whole slot (one BCLK period), falling half a
-//   period after the LSB's rising edge, so the last bit clocked in before
-//   the falling edge is the LSB.
+// - PCM1704: 24 bits BTC MSB first, rising BCLK edge (<= 25 MHz), "any
+//   number of bits can precede the 24", transfer on the falling WCLK edge;
+//   WCLK high and low for more than one BCLK period, 10 ns from a rising
+//   BCLK edge to the falling WCLK edge and back.
+// - AD1860: LE may be high while the word shifts in; high >= 40 ns, low
+//   >= 40 ns, >= 60 ns from the LSB's rising CLK edge to the falling LE
+//   edge, >= 15 ns from there to the next rising edge. AD1865: the same
+//   with >= 40 ns from the LSB edge (its application drives LL / LR from
+//   a 50 % word clock).
+// - Dual16 .. dual24: LSB in slot F-1. LATCH rises at the start of slot
+//   F-3 (I2S_LATCH_SLOTS BCLK periods before the frame end) and falls one
+//   state-machine cycle (D clk_sys, I2S_LATCH_TAIL) after the BCLK falling
+//   edge that starts the next frame's slot 0, so the last bit clocked in
+//   before it is the LSB; the next MSB is on the data line by then but is
+//   clocked only at the rising edge after it. From the LSB's rising edge
+//   to the falling LATCH edge: half a period plus D clk_sys, at least
+//   78 ns over both clock tables, oversampled or not (the AD1860 asks for
+//   60 ns; at the BCLK falling edge it would be 52 ns at the shortest);
+//   from there to the next rising edge: the rest of the low half, at
+//   least 26 ns (15 ns asked). Worst case dual24 at 48 kHz, F25 N4 D4.
 static const i2s_format_spec_t i2s_format_table[I2S_FORMAT_COUNT] = {
-    [I2S_FORMAT_I2S]                = {1, {0x0, 0x3, 0x3, 0x0}, I2S_CONV_COPY,  0,  0,  false, false},
-    [I2S_FORMAT_LEFT_JUSTIFIED]     = {1, {0x3, 0x3, 0x0, 0x0}, I2S_CONV_COPY,  0,  0,  false, false},
-    [I2S_FORMAT_RIGHT_JUSTIFIED_24] = {1, {0x3, 0x3, 0x0, 0x0}, I2S_CONV_SHIFT, 8,  0,  false, false},
-    [I2S_FORMAT_RIGHT_JUSTIFIED_16] = {1, {0x3, 0x3, 0x0, 0x0}, I2S_CONV_SHIFT, 16, 0,  false, false},
-    [I2S_FORMAT_DUAL_16]            = {2, {0x1, 0x0, 0x0, 0x0}, I2S_CONV_DUAL,  0,  16, true,  true},
-    [I2S_FORMAT_DUAL_18]            = {2, {0x0, 0x3, 0x0, 0x0}, I2S_CONV_DUAL,  0,  18, false, false},
-    [I2S_FORMAT_DUAL_20]            = {2, {0x0, 0x3, 0x0, 0x0}, I2S_CONV_DUAL,  0,  20, false, false},
-    [I2S_FORMAT_DUAL_24]            = {2, {0x0, 0x3, 0x0, 0x0}, I2S_CONV_DUAL,  0,  24, false, false},
+    [I2S_FORMAT_I2S]             = {1, {0x0, 0x3, 0x3, 0x0}, I2S_CONV_COPY,  0,                 0,  false, false},
+    [I2S_FORMAT_LEFT_JUSTIFIED]  = {1, {0x3, 0x3, 0x0, 0x0}, I2S_CONV_COPY,  0,                 0,  false, false},
+    [I2S_FORMAT_RIGHT_JUSTIFIED] = {1, {0x3, 0x3, 0x0, 0x0}, I2S_CONV_SHIFT, 32u - I2S_RJ_BITS, 0,  false, false},
+    [I2S_FORMAT_TDA1541A]        = {2, {0x1, 0x0, 0x0, 0x0}, I2S_CONV_DUAL,  0,                 16, true,  true},
+    [I2S_FORMAT_DUAL_16]         = {2, {0x0, 0x3, 0x0, 0x0}, I2S_CONV_DUAL,  0,                 16, false, false},
+    [I2S_FORMAT_DUAL_18]         = {2, {0x0, 0x3, 0x0, 0x0}, I2S_CONV_DUAL,  0,                 18, false, false},
+    [I2S_FORMAT_DUAL_20]         = {2, {0x0, 0x3, 0x0, 0x0}, I2S_CONV_DUAL,  0,                 20, false, false},
+    [I2S_FORMAT_DUAL_24]         = {2, {0x0, 0x3, 0x0, 0x0}, I2S_CONV_DUAL,  0,                 24, false, false},
 };
 
 typedef struct {
@@ -102,7 +135,9 @@ typedef struct {
     uint8_t cycles;     // N: state-machine cycles per slot
     uint8_t divider;    // D: integer clock divider of the state machine(s)
     uint8_t lsb_slot;   // dual-line: slot carrying the LSB; 0 otherwise
-    uint8_t latch_slot; // dual-line: slot carrying the LATCH pulse (0 or F-1); 0 otherwise
+    uint8_t latch_slot; // dual-line: first slot of the LATCH pulse (0 or F - latch_slots); 0 otherwise
+    uint8_t latch_slots;// dual-line: LATCH slots before the frame end (1 for the TDA1541A: slot 0)
+    uint8_t latch_tail; // dual-line: LATCH cycles into the next frame's slot 0 (0 for the TDA1541A)
     uint8_t out_pins;   // 1 or 2
     uint8_t x_preload;  // set x to this before enabling: the first loop's slot count - 1
 } i2s_timing_t;
@@ -118,8 +153,8 @@ static inline unsigned i2s_oversampling(i2s_format_t f, uint32_t rate, i2s_filte
 }
 
 // Smallest frame: 64 slots for the direct formats (fixed), the word alone
-// for dual-line (the LATCH pulse shares a slot with the LSB, or in dual16
-// with the MSB).
+// for dual-line (the LATCH pulse shares a slot with the LSB, or in the
+// TDA1541A format with the MSB).
 static inline unsigned i2s_min_slots(const i2s_format_spec_t *s) {
     return s->conv == I2S_CONV_DUAL ? s->bits : I2S_DIRECT_SLOTS;
 }
@@ -130,10 +165,25 @@ static inline unsigned i2s_slot_instructions(unsigned n) {
     return (lo + 7u) / 8u + (hi + 7u) / 8u;
 }
 
-// Program length for n cycles per slot: four groups for the direct
-// formats, two for dual-line.
+// LATCH pulse length in slots of a dual-line format, 0 for the others.
+static inline unsigned i2s_latch_slots(const i2s_format_spec_t *s) {
+    if (s->conv != I2S_CONV_DUAL)
+        return 0u;
+    return s->latch_first ? 1u : I2S_LATCH_SLOTS;
+}
+
+// Program length for n cycles per slot: four slot groups for the direct
+// formats, two for the TDA1541A; for dual16 .. dual24 slot 0 (its low half
+// split by the LATCH tail), the loop and one per LATCH slot.
 static inline unsigned i2s_program_length(const i2s_format_spec_t *s, unsigned n) {
-    return (s->conv == I2S_CONV_DUAL ? 2u : 4u) * i2s_slot_instructions(n);
+    unsigned slot = i2s_slot_instructions(n);
+    if (s->conv != I2S_CONV_DUAL)
+        return 4u * slot;
+    if (s->latch_first)
+        return 2u * slot;
+    unsigned lo = n / 2u, hi = n - lo;
+    unsigned first = (I2S_LATCH_TAIL + 7u) / 8u + (lo - I2S_LATCH_TAIL + 7u) / 8u + (hi + 7u) / 8u;
+    return first + (1u + I2S_LATCH_SLOTS) * slot;
 }
 
 // Timing for the S/PDIF divider (128 x spdif_div clk_sys cycles per input
@@ -176,12 +226,18 @@ static inline bool i2s_select_timing(uint32_t spdif_div, i2s_format_t f, unsigne
             t->divider = (uint8_t)d;
             t->out_pins = s->out_pins;
             if (dual) {
+                unsigned w = i2s_latch_slots(s);
                 t->lsb_slot = (uint8_t)(slots - 1u);
-                t->latch_slot = (uint8_t)(s->latch_first ? 0u : slots - 1u);
-                t->x_preload = (uint8_t)(slots - 2u);
+                t->latch_slot = (uint8_t)(s->latch_first ? 0u : slots - w);
+                t->latch_slots = (uint8_t)w;
+                t->latch_tail = (uint8_t)(s->latch_first ? 0u : I2S_LATCH_TAIL);
+                // The loop: slots 1 .. F-1 (TDA1541A) or 1 .. F-w-1.
+                t->x_preload = (uint8_t)(slots - (s->latch_first ? 0u : w) - 2u);
             } else {
                 t->lsb_slot = 0;
                 t->latch_slot = 0;
+                t->latch_slots = 0;
+                t->latch_tail = 0;
                 t->x_preload = I2S_DIRECT_LOOP_SLOTS - 1u;
             }
             return true;
@@ -195,7 +251,7 @@ static inline unsigned i2s_frame_cycles(const i2s_timing_t *t) {
     return (unsigned)t->slots * t->cycles;
 }
 
-// Dual16: BCLK periods per half of the TDA1541A DEM clock. DEM always
+// TDA1541A format: BCLK periods per half of the DEM clock. DEM always
 // runs at the oversampled word rate (8x Fs below 50 kHz, 4x above), also
 // with NOS and the sinc compensation, where it is BCLK / 2 or BCLK / 4 (16
 // slots): F x osr / dem_osr BCLK periods per DEM period, a whole number of
@@ -205,7 +261,7 @@ static inline unsigned i2s_frame_cycles(const i2s_timing_t *t) {
 static inline unsigned i2s_dem_half_bclks(const i2s_timing_t *t, i2s_format_t f, uint32_t rate) {
     unsigned dem_osr = i2s_filter_osr(I2S_FILTER_SHARP, rate);
     unsigned bclks = (unsigned)t->slots * t->osr;
-    if (f != I2S_FORMAT_DUAL_16 || t->osr == 0 || dem_osr % t->osr != 0 ||
+    if (f != I2S_FORMAT_TDA1541A || t->osr == 0 || dem_osr % t->osr != 0 ||
         bclks % (2u * dem_osr) != 0)
         return 0u;
     unsigned k = bclks / (2u * dem_osr);
@@ -227,37 +283,74 @@ static inline uint32_t i2s_words_per_frames(const i2s_timing_t *t, uint32_t n_fr
 // `out pins, n` (data changes at the slot start) followed by nops, BCLK
 // low then high, the LRCK / LATCH level per half from the format table;
 // the slot's last instruction is `jmp x--` to the group's start (loop
-// group) or `set x` to the next loop's count - 1 (special group). Groups:
-// direct formats L loop (31 slots), L last, R loop, R last; dual18 / 20 /
-// 24 a loop of F-1 slots then the LATCH slot; dual16 the LATCH slot
-// (slot 0) then a loop of F-1 slots. Wrap target 0, wrap at length - 1.
-// Before enabling, x must be t->x_preload (for dual16 the program starts
-// at the special slot, which sets x itself). Returns the length.
+// group), `set x` to the loop's count - 1 (special slot) or a nop (LATCH
+// slot). Groups: direct formats L loop (31 slots), L last, R loop, R last;
+// dual-line the special slot 0, then the loop of the following slots;
+// dual16 .. 24 end the frame with I2S_LATCH_SLOTS LATCH slots and carry
+// LATCH into slot 0 for I2S_LATCH_TAIL cycles of its low half; the
+// TDA1541A's slot 0 carries its LE pulse in the low half. Wrap target 0,
+// wrap at length - 1. Before enabling, x must be t->x_preload (dual-line:
+// the program starts at slot 0, which sets x itself). Returns the length.
 static inline unsigned i2s_program_build(uint16_t *prog, const i2s_timing_t *t, i2s_format_t f) {
+    enum { LOOP, PLAIN, SPECIAL };
     const i2s_format_spec_t *s = &i2s_format_table[f];
     bool dual = s->conv == I2S_CONV_DUAL;
-    unsigned groups = dual ? 2u : 4u;
-    unsigned loop_slots = dual ? t->slots - 1u : I2S_DIRECT_LOOP_SLOTS;
-    bool special_first = dual && s->latch_first;
+    unsigned loop_slots = dual ? (unsigned)t->x_preload + 1u : I2S_DIRECT_LOOP_SLOTS;
+    uint8_t kind[2u + I2S_LATCH_SLOTS], line[2u + I2S_LATCH_SLOTS];
+    unsigned groups = 0;
+    if (!dual) {
+        for (unsigned g = 0; g < 4u; g++) {
+            kind[groups] = (g & 1u) ? SPECIAL : LOOP;
+            line[groups++] = s->line[g];
+        }
+    } else if (s->latch_first) {
+        kind[groups] = SPECIAL;
+        line[groups++] = s->line[0];
+        kind[groups] = LOOP;
+        line[groups++] = s->line[1];
+    } else {
+        kind[groups] = SPECIAL;
+        line[groups++] = 0x0;                   // plus the tail
+        kind[groups] = LOOP;
+        line[groups++] = s->line[0];
+        for (unsigned k = 0; k < t->latch_slots; k++) {
+            kind[groups] = PLAIN;
+            line[groups++] = s->line[1];
+        }
+    }
     unsigned n = t->cycles, lo = n / 2u, hi = n - lo;
     unsigned len = 0;
     for (unsigned g = 0; g < groups; g++) {
-        bool special = ((g & 1u) != 0) != special_first;
         unsigned start = len;
-        for (unsigned half = 0; half < 2; half++) {
-            unsigned side = (half ? I2S_SIDE_BCLK : 0u) |
-                            (((s->line[g] >> half) & 1u) ? I2S_SIDE_LINE : 0u);
-            unsigned left = half ? hi : lo;
-            bool first = true;
+        // Segments of the slot: cycles, BCLK half, LRCK / LATCH level.
+        unsigned seg_n[3], seg_half[3], seg_line[3], segs = 0;
+        unsigned tail = kind[g] == SPECIAL && dual ? t->latch_tail : 0u;
+        if (tail) {
+            seg_n[segs] = tail;
+            seg_half[segs] = 0;
+            seg_line[segs++] = 1;
+        }
+        seg_n[segs] = lo - tail;
+        seg_half[segs] = 0;
+        seg_line[segs++] = line[g] & 1u;
+        seg_n[segs] = hi;
+        seg_half[segs] = 1;
+        seg_line[segs++] = (line[g] >> 1) & 1u;
+        bool first = true;
+        for (unsigned k = 0; k < segs; k++) {
+            unsigned side = (seg_half[k] ? I2S_SIDE_BCLK : 0u) | (seg_line[k] ? I2S_SIDE_LINE : 0u);
+            unsigned left = seg_n[k];
             while (left) {
                 unsigned d = left > 8u ? 8u : left;
                 left -= d;
+                bool last = k == segs - 1u && left == 0;
                 unsigned op;
-                if (half == 0 && first)
+                if (first)
                     op = pio_encode_out(pio_pins, s->out_pins);
-                else if (half == 1 && left == 0)
-                    op = special ? pio_encode_set(pio_x, loop_slots - 1u)
-                                 : pio_encode_jmp_x_dec(start);
+                else if (last && kind[g] == SPECIAL)
+                    op = pio_encode_set(pio_x, loop_slots - 1u);
+                else if (last && kind[g] == LOOP)
+                    op = pio_encode_jmp_x_dec(start);
                 else
                     op = pio_encode_nop();
                 prog[len++] = (uint16_t)(op | pio_encode_sideset(I2S_SIDE_BITS, side) |
@@ -295,7 +388,7 @@ static inline unsigned i2s_mclk_program_build(uint16_t *prog, unsigned d, unsign
     return len;
 }
 
-// Builds the dual16 DEM program into prog[I2S_CLOCK_PROGRAM_MAX] for the
+// Builds the TDA1541A DEM program into prog[I2S_CLOCK_PROGRAM_MAX] for the
 // clock state machine running at clk_sys (divider 1): a 50 % square wave of
 // 2 k BCLK periods, each half counting k BCLK periods on the pad (`wait
 // gpio`), so it follows the I2S state machine's divider, trimmed or not.
@@ -467,9 +560,10 @@ I2S_CONV_INLINE void i2s_pack_any(uint32_t *dst, const int32_t *pcm, const int32
 // a word boundary. tab: i2s_pack_tables_init() with the format's word
 // length.
 //
-// Four loops: F 16 (dual16, one word per frame), F 32 (two words, the
-// data at a fixed offset), F 24 (three words per two frames, fixed
-// offsets), both without offset binary (dual16 is F 16 in practice), and
+// Four loops: F 16 (dual16 and the TDA1541A, one word per frame), F 32
+// (two words, the data at a fixed offset), F 24 (three words per two
+// frames, fixed offsets), both without offset binary (the TDA1541A is
+// F 16 in practice), and
 // any other F, where a frame starts at any even bit of a word: each frame
 // is taken as its data followed by the next frame's leading zeros, the
 // block starts with the first frame's and ends with the last data. The general loop keeps p (1..32) stream bits
@@ -530,7 +624,7 @@ I2S_CONV_INLINE void i2s_pack_dual(uint32_t *dst, const int32_t *pcm, uint32_t n
         return;
     }
 
-    // The general loop with ob a constant: only dual16 inverts the MSB.
+    // The general loop with ob a constant: only the TDA1541A inverts the MSB.
     int32_t adv = 2 * (int32_t)t->slots - 32;
     if (ob)
         i2s_pack_any(dst, pcm, end, tab, scaled, 0xC0000000u, lead, adv);

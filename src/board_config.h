@@ -12,8 +12,8 @@
 // I2S / dual-line output (i2s/i2s_tx.h): DATA (DL in the dual-line modes)
 // and DR are consecutive PIO out pins; BCLK and LRCK (LATCH in the
 // dual-line modes) are consecutive side-set pins; CLOCK carries the
-// 256 Fs MCLK in the I2S / LJ / RJ formats and the TDA1541 DEM clock in
-// dual-line 16 (low in the other dual-line formats).
+// 256 Fs MCLK in the I2S / LJ / RJ formats and the DEM clock in the
+// TDA1541A format (low in the other dual-line formats).
 #if USB2SPDIF_BOARD_RP2350_ONE
 // S/PDIF at the end of the GP0..GP13 row (the short side of the board);
 // I2S in the row next to 3V3: GP28, 27, 26, 15, 14 in order.

@@ -63,7 +63,8 @@
 //          B<bad> G<gaps> K<skip> [@<n>:<exp>><L>/<R>]
 //
 //   fmt    output format from the format jumpers, i2s_format_name(): i2s,
-//          lj, rj24, rj16, dual16, dual18, dual20, dual24 (in every state)
+//          lj, rj16 (rj24 with USB2SPDIF_RJ24), tda1541a, dual16, dual18,
+//          dual20, dual24 (in every state)
 //   flt    filter of the output (every state): for the dual-line formats
 //          the filter jumpers' i2s_filter_name() with the oversampling of
 //          the running output appended for the oversampling filters
@@ -79,11 +80,11 @@
 //          pins) slots, i.e. 320 / 160 frames of 64 slots for the direct
 //          formats, and 20480 / F (10240 / F) output frames for the
 //          dual-line formats, F = 16 .. 32 slots per frame from the
-//          generator (e.g. 1280 / 640 for dual16)
+//          generator (e.g. 1280 / 640 for dual16 and tda1541a)
 //   Z      silent frames
 //   S      sample errors, "-" when no sample check ran. Direct formats and
 //          nos: pattern violations (a format narrower than the stream,
-//          rj16 or dual16 .. dual20 at 24 bits, is checked at its own
+//          rj16, tda1541a or dual16 .. dual20 at 24 bits, is checked at its own
 //          width); test tone build: no check. Filtered formats (every
 //          filter but nos, sinc included): frames that differ from the
 //          reference stream, which is the window's S/PDIF samples run

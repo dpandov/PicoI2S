@@ -22,7 +22,7 @@
 // state machine drives I2S_CLOCK_PIN: in the direct formats a 256 Fs MCLK
 // (which needs the even S/PDIF dividers of the fast clock table), run at
 // clk_sys and restarted on every BCLK edge read back from the pad, so it
-// stays locked to BCLK under the trim; in dual16 (TDA1541A) the DEM
+// stays locked to BCLK under the trim; in the TDA1541A format the DEM
 // clock, a 50 % square wave at the oversampled word rate (8x Fs below
 // 50 kHz, 4x above) with every filter, NOS included, likewise at clk_sys
 // counting BCLK periods on the pad. The pin is low in the other dual-line
@@ -42,18 +42,26 @@ typedef enum {
     I2S_FORMAT_I2S = 0,             // 000: Philips I2S, data one BCLK after the LRCK edge,
                                     //      LRCK low = left, 32-bit slots
     I2S_FORMAT_LEFT_JUSTIFIED,      // 001: MSB at the LRCK edge, LRCK high = left
-    I2S_FORMAT_RIGHT_JUSTIFIED_24,  // 010: LSB at the end of the slot, 24 bits
-    I2S_FORMAT_RIGHT_JUSTIFIED_16,  // 011: 16 bits
-    I2S_FORMAT_DUAL_16,             // 100: DL + DR, common BCLK and LATCH, 16 bits (TDA1541 simultaneous)
-    I2S_FORMAT_DUAL_18,             // 101: 18 bits (AD1865)
-    I2S_FORMAT_DUAL_20,             // 110: 20 bits (PCM63, PCM1702)
-    I2S_FORMAT_DUAL_24,             // 111: 24 bits
+    I2S_FORMAT_RIGHT_JUSTIFIED,     // 010: LSB at the end of the slot, I2S_RJ_BITS bits
+    I2S_FORMAT_TDA1541A,            // 011: TDA1541A simultaneous mode: DL + DR, 16 bits
+                                    //      offset binary, LE before the MSB, DEM clock
+    I2S_FORMAT_DUAL_16,             // 100: DL + DR, common BCLK and LATCH, 16 bits (PCM56)
+    I2S_FORMAT_DUAL_18,             // 101: 18 bits (AD1865, AD1860 / AD1861)
+    I2S_FORMAT_DUAL_20,             // 110: 20 bits (AD1862, PCM63, PCM1702)
+    I2S_FORMAT_DUAL_24,             // 111: 24 bits (PCM1704)
 } i2s_format_t;
 
 #define I2S_FORMAT_COUNT 8u
 
+// Right-justified word length: 16, or 24 with the USB2SPDIF_RJ24 build option.
+#if USB2SPDIF_RJ24
+#define I2S_RJ_BITS 24u
+#else
+#define I2S_RJ_BITS 16u
+#endif
+
 static inline bool i2s_format_is_dual(i2s_format_t f) {
-    return f >= I2S_FORMAT_DUAL_16;
+    return f >= I2S_FORMAT_TDA1541A;
 }
 
 // Filter for the dual-line formats, selected by the three filter jumpers
@@ -133,6 +141,6 @@ int32_t i2s_tx_phase_drift_words(void);
 // tasks.
 void i2s_tx_core1_task(void);
 
-// Short name of a format for reports: "i2s", "lj", "rj24", "rj16",
-// "dual16", "dual18", "dual20", "dual24".
+// Short name of a format for reports: "i2s", "lj", "rj16" (or "rj24"),
+// "tda1541a", "dual16", "dual18", "dual20", "dual24".
 const char *i2s_format_name(i2s_format_t f);

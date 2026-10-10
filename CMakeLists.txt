@@ -82,6 +82,12 @@ if(USB2SPDIF_TEST_TONE)
     target_compile_definitions(usb2spdif PRIVATE USB2SPDIF_TEST_TONE=1)
 endif()
 
+# Format jumper code 010: right-justified 24-bit instead of 16-bit.
+option(USB2SPDIF_RJ24 "Right-justified format with 24-bit words instead of 16" OFF)
+if(USB2SPDIF_RJ24)
+    target_compile_definitions(usb2spdif PRIVATE USB2SPDIF_RJ24=1)
+endif()
+
 # Decodes the S/PDIF and I2S outputs on core 1 and reports them as USB
 # strings, for tools/selftest.py (src/selftest/selftest.h). With the test
 # tone, only framing and channel status are checked.
