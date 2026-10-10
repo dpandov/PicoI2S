@@ -53,8 +53,8 @@ typedef enum {
 
 #define I2S_FORMAT_COUNT 8u
 
-// Right-justified word length: 16, or 24 with the USB2SPDIF_RJ24 build option.
-#if USB2SPDIF_RJ24
+// Right-justified word length: 16, or 24 with the PICOI2S_RJ24 build option.
+#if PICOI2S_RJ24
 #define I2S_RJ_BITS 24u
 #else
 #define I2S_RJ_BITS 16u

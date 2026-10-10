@@ -32,7 +32,7 @@ _Static_assert(I2S_BCLK_PIN > I2S_DATA_PIN + 1 && I2S_LRCK_PIN - I2S_DATA_PIN < 
                "I2S pins must lie within 16 pins above I2S_DATA_PIN");
 
 // The test tone is not the pattern: check framing and channel status only.
-#if USB2SPDIF_TEST_TONE
+#if PICOI2S_TEST_TONE
 #define PATTERN_CHECK false
 #else
 #define PATTERN_CHECK true

@@ -15,7 +15,7 @@
 
 void monitor_init(void) {
     log_init();
-    log_printf("\nusb2spdif\n");
+    log_printf("\nPicoI2S\n");
     log_printf("clk_sys %lu, clk_peri %lu, clk_usb %lu\n",
                (unsigned long)clock_get_hz(clk_sys),
                (unsigned long)clock_get_hz(clk_peri),
@@ -41,7 +41,7 @@ static const char *input_name(spdif_rx_input_t input) {
 }
 
 static void receiver_stats(spdif_rx_stats_t *st) {
-#if USB2SPDIF_TEST_TONE
+#if PICOI2S_TEST_TONE
     *st = (spdif_rx_stats_t){0};
 #else
     spdif_rx_get_stats(st);
@@ -267,16 +267,16 @@ static void bits3(char *s, unsigned code) {
 // is the jumper setting even where it is not used (I2S / LJ / RJ).
 const char *monitor_config_string(void) {
     static char buf[112];
-#if USB2SPDIF_BOARD_RP2350_ONE
+#if PICOI2S_BOARD_RP2350_ONE
     const char *board = "rp2350-one";
 #else
     const char *board = "pico2";
 #endif
-#if USB2SPDIF_TEST_TONE && USB2SPDIF_SELFTEST
+#if PICOI2S_TEST_TONE && PICOI2S_SELFTEST
     const char *build = "tone+selftest";
-#elif USB2SPDIF_TEST_TONE
+#elif PICOI2S_TEST_TONE
     const char *build = "tone";
-#elif USB2SPDIF_SELFTEST
+#elif PICOI2S_SELFTEST
     const char *build = "selftest";
 #else
     const char *build = "normal";

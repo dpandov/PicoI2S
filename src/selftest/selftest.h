@@ -1,4 +1,4 @@
-// Output self-test (build option USB2SPDIF_SELFTEST).
+// Output self-test (build option PICOI2S_SELFTEST).
 //
 // A PIO state machine and a DMA channel sample SPDIF_PIN, and a second
 // pair captures the I2S / dual-line pins once per BCLK slot. The S/PDIF

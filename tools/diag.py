@@ -1,4 +1,4 @@
-"""Read the usb2spdif diagnostic string from a running device.
+"""Read the PicoI2S diagnostic string from a running device.
 
 The firmware serves a hidden USB string descriptor (index 0x20) with the
 previous-boot crash record and live status. It is read through the

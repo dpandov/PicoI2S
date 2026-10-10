@@ -1,4 +1,4 @@
-"""Live monitor of the usb2spdif bridge: sessions, format, data rate, silence.
+"""Live monitor of PicoI2S: sessions, format, data rate, silence.
 
 Polls the device's diagnostic string (tools/diag.py) and its session string
 a few times per second and prints one timestamped line per event:
@@ -452,7 +452,7 @@ class Monitor:
         self.out(f"summary: {self.streams_total} stream starts, {fmt_duration(total)} streaming")
 
     def run(self):
-        self.out("monitoring usb2spdif (Ctrl+C to stop)")
+        self.out("monitoring PicoI2S (Ctrl+C to stop)")
         try:
             while True:
                 self.step()

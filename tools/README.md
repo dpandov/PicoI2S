@@ -1,6 +1,6 @@
 # Host tools
 
-Scripts that test, monitor and diagnose a usb2spdif bridge from the PC,
+Scripts that test, monitor and diagnose a PicoI2S device from the PC,
 and design and plot its dual-line filters. Run them from the repository
 root.
 
@@ -37,15 +37,15 @@ reset interface, which Windows binds to WinUSB automatically (Windows 8.1
 or later); no audio driver is involved. They find the device in both modes
 (UAC2 PID 0x0001, UAC1 PID 0x0002) and detect the mode from the
 diagnostic string. Run the Windows test tools in a local session: over
-Remote Desktop, Windows redirects audio and the bridge's playback endpoint
+Remote Desktop, Windows redirects audio and the device's playback endpoint
 is not available.
 
 On Linux, libusb needs access to the device; a udev rule gives it to every
-user (then replug the bridge):
+user (then replug the device):
 
 ```
 echo 'SUBSYSTEM=="usb", ATTR{idVendor}=="1209", ATTR{idProduct}=="000[12]", MODE="0666"' |
-    sudo tee /etc/udev/rules.d/60-usb2spdif.rules
+    sudo tee /etc/udev/rules.d/60-picoi2s.rules
 sudo udevadm control --reload-rules
 ```
 
@@ -60,12 +60,12 @@ other than `v0`, or `vM`).
 
 Bit-exact check of the S/PDIF and I2S / dual-line outputs, with no
 receiver, DAC, probe or UART. Needs firmware built with
-`-DUSB2SPDIF_SELFTEST=ON` (see Self-test in the main README): the bridge
+`-DPICOI2S_SELFTEST=ON` (see Self-test in the main README): the device
 decodes its own output pins on core 1 and serves the results as USB strings
 0x21 (S/PDIF) and 0x22 (I2S). The script plays a test pattern and reads
 the reports. Windows: `wasapi_play.c` (built on first use into
 `tools/build/`; PortAudio's exclusive mode is not bit-exact). Linux:
-`aplay` on the bridge's ALSA `hw` device (found by name in
+`aplay` on the device's ALSA `hw` device (found by name in
 `/proc/asound/cards`), fed by the script: `hw` has no format conversion
 and no software volume, so it is bit-exact. Nothing else may hold the card
 (stop PipeWire / PulseAudio for the test). The script first sets the
@@ -89,8 +89,8 @@ python tools/selftest.py --i2s-filter slow      require this dual-line filter (j
 | `--soak MINUTES` | play one format continuously and log every glitch |
 | `--rate HZ`, `--bits 16\|24` | soak format (default 48000 / 24; 16 in UAC1 mode) |
 | `--interval S` | soak read interval (default 5 s) |
-| `--device NAME` | playback device name part (Windows endpoint, Linux card; default: the bridge in either mode) |
-| `--i2s-format FMT` | expected I2S format: i2s, lj, rj16 (rj24 with the `USB2SPDIF_RJ24` build), tda1541a, dual16, dual18, dual20, dual24 (default: what the device reports) |
+| `--device NAME` | playback device name part (Windows endpoint, Linux card; default: the device in either mode) |
+| `--i2s-format FMT` | expected I2S format: i2s, lj, rj16 (rj24 with the `PICOI2S_RJ24` build), tda1541a, dual16, dual18, dual20, dual24 (default: what the device reports) |
 | `--i2s-filter NAME` | expected dual-line filter: sharp, slow, minphase, sinc, nos (default: what the device reports) |
 | `--status` | print the diagnostic, S/PDIF and I2S reports once and exit |
 | `-v`, `--verbose` | print every read |
@@ -139,7 +139,7 @@ seconds. Every failed check or counter increase is logged with a time
 stamp, I2S failures included. It passes only with zero events. Bad windows
 are counted on the device, so a glitch between two reads is still caught.
 
-**Test-tone firmware** (`-DUSB2SPDIF_TEST_TONE=ON` as well): the output is
+**Test-tone firmware** (`-DPICOI2S_TEST_TONE=ON` as well): the output is
 the tone, not the pattern, and the report shows `s-`. The script then checks
 the tone's framing, channel status and rate, plus the I2S framing. A
 filtered dual-line output still gets its bit-exact check against the
@@ -177,7 +177,7 @@ e.g. #812 ok i2s - tx48000/24 f320 z0 s0 e0 L0 B0 G0 K1
 
 | Field | Meaning |
 |---|---|
-| fmt | jumper format: `i2s`, `lj`, `rj16` (`rj24` with the `USB2SPDIF_RJ24` build), `tda1541a`, `dual16`, `dual18`, `dual20`, `dual24` |
+| fmt | jumper format: `i2s`, `lj`, `rj16` (`rj24` with the `PICOI2S_RJ24` build), `tda1541a`, `dual16`, `dual18`, `dual20`, `dual24` |
 | flt | dual-line filter (jumpers): `sharp`, `slow` or `minphase` with the oversampling of the running output appended (`sharp8`, `slow4`, ...; the bare name while stopped), `sinc`, `nos`; `-` for the direct formats |
 | state | `ok`, `sil`, `idle` (stopped, pins low), `wait`; failures: `ERR`, `NOSYNC` (LRCK static / no LATCH), `NOCLK` (no BCLK edges), `NOTIM` (no timing for the format at this rate), `OFF` (S/PDIF runs, I2S does not), `PINHI` (stopped, a pin high: `lvl<hex>` = DATA, DR, BCLK, LRCK in bits 0..3), `NOPIO` |
 | `s` | pattern violations (direct, nos) or frames differing from the filtered S/PDIF reference (sharp, slow, minphase, sinc); `-` when no sample check ran |
@@ -206,7 +206,7 @@ and the rate trim and servo lock are reported per format.
 
 ## monitor.py
 
-Watches a running bridge (normal or self-test firmware) and prints one
+Watches a running device (normal or self-test firmware) and prints one
 timestamped line per event. It polls the diagnostic string and the session
 string (0x23) a few times per second.
 

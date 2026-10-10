@@ -17,13 +17,13 @@
 
 // Bump on every descriptor change: Windows caches descriptors per
 // VID/PID/bcdDevice.
-#define USB_BCD_DEVICE          0x0103
+#define USB_BCD_DEVICE          0x0104
 
-#define USB_MANUFACTURER_STR    "usb2spdif"
-#define USB_PRODUCT_STR         "USB to S/PDIF"
+#define USB_MANUFACTURER_STR    "PicoI2S"
+#define USB_PRODUCT_STR         "Pico USB to I2S"
 // UAC1 mode: replaces the product and the audio function string (hosts
 // name the device after either). The host tools match both names.
-#define USB_PRODUCT_STR_UAC1    "USB to SPDIF"
+#define USB_PRODUCT_STR_UAC1    "Pico I2S"
 
 //--------------------------------------------------------------------+
 // Interfaces
@@ -56,12 +56,12 @@ enum {
 
 #define UAC2_ENTITY_INPUT_TERMINAL   0x01   // USB streaming
 #define UAC2_ENTITY_FEATURE_UNIT     0x02   // master mute and volume
-#define UAC2_ENTITY_OUTPUT_TERMINAL  0x03   // S/PDIF interface
+#define UAC2_ENTITY_OUTPUT_TERMINAL  0x03   // digital audio interface
 #define UAC2_ENTITY_CLOCK            0x04   // internal programmable clock
 
-// "S/PDIF interface" external terminal type (same code in UAC1 and UAC2);
-// TinyUSB has no enum for it.
-#define TERM_TYPE_EXT_SPDIF          0x0605
+// "Digital audio interface" external terminal type (same code in UAC1 and
+// UAC2; Windows names the endpoint after it); TinyUSB has no enum for it.
+#define TERM_TYPE_EXT_DIGITAL        0x0602
 
 //--------------------------------------------------------------------+
 // UAC1 entities: Input Terminal -> Feature Unit -> Output Terminal
@@ -69,7 +69,7 @@ enum {
 
 #define UAC1_ENTITY_INPUT_TERMINAL   0x01   // USB streaming
 #define UAC1_ENTITY_FEATURE_UNIT     0x02   // master mute and volume
-#define UAC1_ENTITY_OUTPUT_TERMINAL  0x03   // S/PDIF interface (0x0605)
+#define UAC1_ENTITY_OUTPUT_TERMINAL  0x03   // digital audio interface
 
 //--------------------------------------------------------------------+
 // Endpoints
@@ -111,13 +111,13 @@ enum {
 
 // CS AC entities after the header: clock source, input terminal, feature
 // unit (master and two channels), output terminal.
-#define USB2SPDIF_AC_ENTITIES_LEN (TUD_AUDIO20_DESC_CLK_SRC_LEN \
+#define PICOI2S_AC_ENTITIES_LEN (TUD_AUDIO20_DESC_CLK_SRC_LEN \
     + TUD_AUDIO20_DESC_INPUT_TERM_LEN                            \
     + TUD_AUDIO20_DESC_FEATURE_UNIT_LEN(AUDIO_N_CHANNELS)        \
     + TUD_AUDIO20_DESC_OUTPUT_TERM_LEN)
 
 // One streaming alt setting (alt 1 or 2).
-#define USB2SPDIF_AS_ALT_STREAM_DESC_LEN (TUD_AUDIO20_DESC_STD_AS_LEN \
+#define PICOI2S_AS_ALT_STREAM_DESC_LEN (TUD_AUDIO20_DESC_STD_AS_LEN \
     + TUD_AUDIO20_DESC_CS_AS_INT_LEN                                  \
     + TUD_AUDIO20_DESC_TYPE_I_FORMAT_LEN                              \
     + TUD_AUDIO20_DESC_STD_AS_ISO_EP_LEN                              \
@@ -125,32 +125,32 @@ enum {
     + TUD_AUDIO20_DESC_STD_AS_ISO_FB_EP_LEN)
 
 // The whole UAC2 function, IAD included.
-#define USB2SPDIF_AUDIO_DESC_LEN (TUD_AUDIO20_DESC_IAD_LEN \
+#define PICOI2S_AUDIO_DESC_LEN (TUD_AUDIO20_DESC_IAD_LEN \
     + TUD_AUDIO20_DESC_STD_AC_LEN                          \
     + TUD_AUDIO20_DESC_CS_AC_LEN                           \
-    + USB2SPDIF_AC_ENTITIES_LEN                            \
+    + PICOI2S_AC_ENTITIES_LEN                            \
     + TUD_AUDIO20_DESC_STD_AS_LEN                          \
-    + 2 * USB2SPDIF_AS_ALT_STREAM_DESC_LEN)
+    + 2 * PICOI2S_AS_ALT_STREAM_DESC_LEN)
 
 // UAC1 Feature Unit with 1-byte controls: master and two channels.
-#define USB2SPDIF_UAC1_FEATURE_UNIT_LEN (7 + (AUDIO_N_CHANNELS + 1))
+#define PICOI2S_UAC1_FEATURE_UNIT_LEN (7 + (AUDIO_N_CHANNELS + 1))
 
 // UAC1 CS AC entities after the header: input terminal, feature unit,
 // output terminal.
-#define USB2SPDIF_UAC1_AC_ENTITIES_LEN (TUD_AUDIO10_DESC_INPUT_TERM_LEN \
-    + USB2SPDIF_UAC1_FEATURE_UNIT_LEN                                  \
+#define PICOI2S_UAC1_AC_ENTITIES_LEN (TUD_AUDIO10_DESC_INPUT_TERM_LEN \
+    + PICOI2S_UAC1_FEATURE_UNIT_LEN                                  \
     + TUD_AUDIO10_DESC_OUTPUT_TERM_LEN)
 
 // 32, 44.1 and 48 kHz.
-#define USB2SPDIF_UAC1_N_RATES  3
+#define PICOI2S_UAC1_N_RATES  3
 
 // The whole UAC1 function, no IAD: AC header naming one streaming
 // interface, which has alt 0 and one 16-bit alt setting.
-#define USB2SPDIF_UAC1_AUDIO_DESC_LEN (TUD_AUDIO10_DESC_STD_AC_LEN \
+#define PICOI2S_UAC1_AUDIO_DESC_LEN (TUD_AUDIO10_DESC_STD_AC_LEN \
     + TUD_AUDIO10_DESC_CS_AC_LEN(1)                                 \
-    + USB2SPDIF_UAC1_AC_ENTITIES_LEN                                \
+    + PICOI2S_UAC1_AC_ENTITIES_LEN                                \
     + 2 * TUD_AUDIO10_DESC_STD_AS_LEN                               \
     + TUD_AUDIO10_DESC_CS_AS_INT_LEN                                \
-    + TUD_AUDIO10_DESC_TYPE_I_FORMAT_LEN(USB2SPDIF_UAC1_N_RATES)    \
+    + TUD_AUDIO10_DESC_TYPE_I_FORMAT_LEN(PICOI2S_UAC1_N_RATES)    \
     + TUD_AUDIO10_DESC_STD_AS_ISO_EP_LEN                            \
     + TUD_AUDIO10_DESC_CS_AS_ISO_EP_LEN)

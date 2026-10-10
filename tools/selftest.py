@@ -1,13 +1,13 @@
-"""usb2spdif self-test: bit-exact check of the S/PDIF and I2S outputs
+"""PicoI2S self-test: bit-exact check of the S/PDIF and I2S outputs
 (Windows, Linux).
 
-Needs firmware built with -DUSB2SPDIF_SELFTEST=ON. The Pico then decodes
+Needs firmware built with -DPICOI2S_SELFTEST=ON. The Pico then decodes
 its own S/PDIF pin and its I2S / dual-line pins on core 1 and reports the
 results as USB strings 0x21 and 0x22; no receiver, probe or UART is needed.
 This script plays a test pattern and reads the reports. Windows: a native
 WASAPI exclusive-mode player (tools/wasapi_play.c, built on first use with
 the ziglang package into tools/build/). Linux: aplay (alsa-utils) on the
-bridge's ALSA hw device, fed by this script; hw has no format conversion
+device's ALSA hw device, fed by this script; hw has no format conversion
 and no software volume, so it is bit-exact (stop PipeWire / PulseAudio
 from holding the card first). Reading the strings needs access to the
 USB device (udev rule, see tools/README.md).
@@ -72,7 +72,7 @@ check or counter increase is logged with a timestamp. Passes only with zero
 events. Bad windows are counted on the device, so a glitch between two
 reads is still caught.
 
-With a test-tone build (-DUSB2SPDIF_TEST_TONE=ON as well) the output is not
+With a test-tone build (-DPICOI2S_TEST_TONE=ON as well) the output is not
 the pattern (report shows "s-"): the script then checks framing, channel
 status and rate of the tone only, plus the I2S framing; a filtered
 dual-line output still gets its bit-exact check against the window's
@@ -101,7 +101,7 @@ I2S report (same header, USB string 0x22, same seq as the S/PDIF window):
         e<framing> L<late> B<bad> G<gaps> K<skipped>
         [@<frame>:<prev or expected L>><L>/<R>]
 
-    fmt     jumper format: i2s, lj, rj16 (rj24 with the USB2SPDIF_RJ24 build),
+    fmt     jumper format: i2s, lj, rj16 (rj24 with the PICOI2S_RJ24 build),
             tda1541a, dual16, dual18, dual20, dual24
     flt     dual-line filter (jumpers): sharp, slow or minphase with the
             oversampling of the running output appended (sharp8, slow4, ...;
@@ -238,16 +238,16 @@ class Player:
         self.proc.communicate()
 
 
-# Linux: the bridge's ALSA card and aplay.
+# Linux: the device's ALSA card and aplay.
 
 TRAILING_SILENCE = 0.2  # s of zeros after the pattern, so the stream ends cleanly
-BRIDGE_NAMES = ("USB to S/PDIF", "USB to SPDIF")
+DEVICE_NAMES = ("Pico USB to I2S", "Pico I2S")
 
 
 def alsa_card(device=None):
     """Index of the first ALSA card whose /proc/asound/cards line contains
-    `device` (default: the bridge's name in either mode), or None."""
-    names = (device,) if device else BRIDGE_NAMES
+    `device` (default: the device's name in either mode), or None."""
+    names = (device,) if device else DEVICE_NAMES
     try:
         with open("/proc/asound/cards") as f:
             lines = f.read().splitlines()
@@ -844,7 +844,7 @@ def main():
                     help="soak bit depth (default 24; 16 in UAC1 mode)")
     ap.add_argument("--interval", type=float, default=5.0, metavar="S",
                     help="soak read interval (default 5 s)")
-    ap.add_argument("--device", help="playback device name part (default: the bridge in either mode)")
+    ap.add_argument("--device", help="playback device name part (default: the device in either mode)")
     ap.add_argument("--i2s-format", choices=I2S_FORMATS, metavar="FMT",
                     help="expected I2S format, one of " + ", ".join(I2S_FORMATS) +
                          " (default: what the device reports)")
@@ -867,11 +867,11 @@ def main():
         print(i2["raw"] if i2 else "<no I2S self-test report>")
         return
     if dg is None:
-        sys.exit(f"usb2spdif not found or not responding: {raw}")
+        sys.exit(f"PicoI2S not found or not responding: {raw}")
     if st is None:
-        sys.exit(f"no self-test report ({raw}): flash a build with -DUSB2SPDIF_SELFTEST=ON")
+        sys.exit(f"no self-test report ({raw}): flash a build with -DPICOI2S_SELFTEST=ON")
     if i2 is None:
-        sys.exit("no I2S self-test report: flash a build with -DUSB2SPDIF_SELFTEST=ON")
+        sys.exit("no I2S self-test report: flash a build with -DPICOI2S_SELFTEST=ON")
     boots = dg["boots"]
     uac1 = dg["uac1"]
     i2s_fmt = args.i2s_format or i2["fmt"]
@@ -904,7 +904,7 @@ def main():
     else:
         exe = alsa_card(args.device)
         if exe is None:
-            sys.exit("no ALSA card with the bridge's name (/proc/asound/cards)")
+            sys.exit("no ALSA card with the device's name (/proc/asound/cards)")
         print(f"alsa:   card {exe} (hw:{exe},0)")
         alsa_volume_max(exe)
     if args.soak:

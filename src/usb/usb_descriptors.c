@@ -21,7 +21,7 @@
 #include "usb/usb_descriptors.h"
 #include "app/monitor.h"
 #include "diag/diag.h"
-#if USB2SPDIF_SELFTEST
+#if PICOI2S_SELFTEST
 #include "selftest/selftest.h"
 #endif
 
@@ -165,7 +165,7 @@ TU_VERIFY_STATIC(AUDIO_EP_SIZE(AUDIO_24BIT_SUBSLOT) <= 1023, "FS iso packet limi
         /*_ctrlch2*/       AUDIO20_CTRL_NONE),                                \
     TUD_AUDIO20_DESC_OUTPUT_TERM(                                             \
         /*_termid*/    UAC2_ENTITY_OUTPUT_TERMINAL,                           \
-        /*_termtype*/  TERM_TYPE_EXT_SPDIF,                                   \
+        /*_termtype*/  TERM_TYPE_EXT_DIGITAL,                                 \
         /*_assocTerm*/ AUDIO_NO_ASSOC_TERMINAL,                               \
         /*_srcid*/     UAC2_ENTITY_FEATURE_UNIT,                              \
         /*_clkid*/     UAC2_ENTITY_CLOCK,                                     \
@@ -205,7 +205,7 @@ TU_VERIFY_STATIC(AUDIO_EP_SIZE(AUDIO_24BIT_SUBSLOT) <= 1023, "FS iso packet limi
         /*_interval*/ AUDIO_EP_INTERVAL_FS)
 
 // _fbsize: AUDIO_FB_EP_SIZE or AUDIO_FB_EP_SIZE_APPLE.
-#define USB2SPDIF_AUDIO_FUNCTION_DESCRIPTOR(_fbsize)                          \
+#define PICOI2S_AUDIO_FUNCTION_DESCRIPTOR(_fbsize)                          \
     TUD_AUDIO20_DESC_IAD(                                                     \
         /*_firstitf*/ ITF_NUM_AUDIO_CONTROL,                                  \
         /*_nitfs*/    2,                                                      \
@@ -217,7 +217,7 @@ TU_VERIFY_STATIC(AUDIO_EP_SIZE(AUDIO_24BIT_SUBSLOT) <= 1023, "FS iso packet limi
     TUD_AUDIO20_DESC_CS_AC(                                                   \
         /*_bcdADC*/   0x0200,                                                 \
         /*_category*/ AUDIO_FUNCTION_CATEGORY,                                \
-        /*_totallen*/ USB2SPDIF_AC_ENTITIES_LEN,                              \
+        /*_totallen*/ PICOI2S_AC_ENTITIES_LEN,                              \
         /*_ctrl*/     (AUDIO20_CTRL_NONE << AUDIO20_CS_AS_INTERFACE_CTRL_LATENCY_POS)), \
     AUDIO_AC_ENTITIES,                                                        \
     TUD_AUDIO20_DESC_STD_AS_INT(                                              \
@@ -228,16 +228,16 @@ TU_VERIFY_STATIC(AUDIO_EP_SIZE(AUDIO_24BIT_SUBSLOT) <= 1023, "FS iso packet limi
     AUDIO_AS_STREAM_ALT(AS_ALT_16BIT, AUDIO_16BIT_SUBSLOT, AUDIO_16BIT_RESOLUTION, _fbsize), \
     AUDIO_AS_STREAM_ALT(AS_ALT_24BIT, AUDIO_24BIT_SUBSLOT, AUDIO_24BIT_RESOLUTION, _fbsize)
 
-TU_VERIFY_STATIC(sizeof((uint8_t const[]){ AUDIO_AC_ENTITIES }) == USB2SPDIF_AC_ENTITIES_LEN,
+TU_VERIFY_STATIC(sizeof((uint8_t const[]){ AUDIO_AC_ENTITIES }) == PICOI2S_AC_ENTITIES_LEN,
                  "CS AC wTotalLength does not match the entity descriptors");
 TU_VERIFY_STATIC(sizeof((uint8_t const[]){ AUDIO_AS_STREAM_ALT(AS_ALT_24BIT, AUDIO_24BIT_SUBSLOT,
                                                                AUDIO_24BIT_RESOLUTION, AUDIO_FB_EP_SIZE) })
-                     == USB2SPDIF_AS_ALT_STREAM_DESC_LEN,
+                     == PICOI2S_AS_ALT_STREAM_DESC_LEN,
                  "AS alt setting length mismatch");
-TU_VERIFY_STATIC(sizeof((uint8_t const[]){ USB2SPDIF_AUDIO_FUNCTION_DESCRIPTOR(AUDIO_FB_EP_SIZE) })
-                     == USB2SPDIF_AUDIO_DESC_LEN,
-                 "USB2SPDIF_AUDIO_DESC_LEN does not match the audio descriptor block");
-TU_VERIFY_STATIC(USB2SPDIF_AUDIO_DESC_LEN == 196, "unexpected audio block length");
+TU_VERIFY_STATIC(sizeof((uint8_t const[]){ PICOI2S_AUDIO_FUNCTION_DESCRIPTOR(AUDIO_FB_EP_SIZE) })
+                     == PICOI2S_AUDIO_DESC_LEN,
+                 "PICOI2S_AUDIO_DESC_LEN does not match the audio descriptor block");
+TU_VERIFY_STATIC(PICOI2S_AUDIO_DESC_LEN == 196, "unexpected audio block length");
 
 //--------------------------------------------------------------------+
 // UAC1 function
@@ -263,7 +263,7 @@ TU_VERIFY_STATIC(UAC1_EP_SIZE <= CFG_TUD_AUDIO_FUNC_1_EP_OUT_SZ_MAX,
 // Feature Unit with 1-byte bmaControls like the PCM2704 (TinyUSB's macro
 // uses 2 bytes): master, channel 1, channel 2, then iFeature.
 #define UAC1_DESC_FEATURE_UNIT_STEREO(_unitid, _srcid, _ctrlmaster, _ctrlch1, _ctrlch2) \
-    USB2SPDIF_UAC1_FEATURE_UNIT_LEN, TUSB_DESC_CS_INTERFACE,                  \
+    PICOI2S_UAC1_FEATURE_UNIT_LEN, TUSB_DESC_CS_INTERFACE,                  \
     AUDIO10_CS_AC_INTERFACE_FEATURE_UNIT, _unitid, _srcid,                    \
     /*bControlSize*/ 1, _ctrlmaster, _ctrlch1, _ctrlch2, /*iFeature*/ 0x00
 
@@ -284,21 +284,21 @@ TU_VERIFY_STATIC(UAC1_EP_SIZE <= CFG_TUD_AUDIO_FUNC_1_EP_OUT_SZ_MAX,
         /*_ctrlch2*/    0x00),                                                \
     TUD_AUDIO10_DESC_OUTPUT_TERM(                                             \
         /*_termid*/    UAC1_ENTITY_OUTPUT_TERMINAL,                           \
-        /*_termtype*/  TERM_TYPE_EXT_SPDIF,                                   \
+        /*_termtype*/  TERM_TYPE_EXT_DIGITAL,                                 \
         /*_assocTerm*/ AUDIO_NO_ASSOC_TERMINAL,                               \
         /*_srcid*/     UAC1_ENTITY_FEATURE_UNIT,                              \
         /*_stridx*/    0x00)
 
 // The rate is set with the endpoint's sampling frequency control
 // (usb_audio.c).
-#define USB2SPDIF_UAC1_AUDIO_FUNCTION_DESCRIPTOR                              \
+#define PICOI2S_UAC1_AUDIO_FUNCTION_DESCRIPTOR                              \
     TUD_AUDIO10_DESC_STD_AC(                                                  \
         /*_itfnum*/ ITF_NUM_AUDIO_CONTROL,                                    \
         /*_nEPs*/   0,                                                        \
         /*_stridx*/ STRID_AUDIO_FUNCTION),                                    \
     TUD_AUDIO10_DESC_CS_AC(                                                   \
         /*_bcdADC*/   0x0100,                                                 \
-        /*_totallen*/ USB2SPDIF_UAC1_AC_ENTITIES_LEN,                         \
+        /*_totallen*/ PICOI2S_UAC1_AC_ENTITIES_LEN,                         \
         /*_itf*/      ITF_NUM_AUDIO_STREAMING),                               \
     UAC1_AC_ENTITIES,                                                         \
     TUD_AUDIO10_DESC_STD_AS_INT(                                              \
@@ -331,22 +331,22 @@ TU_VERIFY_STATIC(UAC1_EP_SIZE <= CFG_TUD_AUDIO_FUNC_1_EP_OUT_SZ_MAX,
         /*_lockdelayunits*/ AUDIO10_CS_AS_ISO_DATA_EP_LOCK_DELAY_UNIT_UNDEFINED, \
         /*_lockdelay*/      0x0000)
 
-TU_VERIFY_STATIC(sizeof((uint8_t const[]){ UAC1_AC_ENTITIES }) == USB2SPDIF_UAC1_AC_ENTITIES_LEN,
+TU_VERIFY_STATIC(sizeof((uint8_t const[]){ UAC1_AC_ENTITIES }) == PICOI2S_UAC1_AC_ENTITIES_LEN,
                  "UAC1 CS AC wTotalLength does not match the entity descriptors");
-TU_VERIFY_STATIC(sizeof((uint8_t const[]){ USB2SPDIF_UAC1_AUDIO_FUNCTION_DESCRIPTOR })
-                     == USB2SPDIF_UAC1_AUDIO_DESC_LEN,
-                 "USB2SPDIF_UAC1_AUDIO_DESC_LEN does not match the audio descriptor block");
+TU_VERIFY_STATIC(sizeof((uint8_t const[]){ PICOI2S_UAC1_AUDIO_FUNCTION_DESCRIPTOR })
+                     == PICOI2S_UAC1_AUDIO_DESC_LEN,
+                 "PICOI2S_UAC1_AUDIO_DESC_LEN does not match the audio descriptor block");
 TU_VERIFY_STATIC(sizeof((uint8_t const[]){ UAC1_DESC_FEATURE_UNIT_STEREO(0, 0, 0, 0, 0) })
-                     == USB2SPDIF_UAC1_FEATURE_UNIT_LEN,
+                     == PICOI2S_UAC1_FEATURE_UNIT_LEN,
                  "UAC1 Feature Unit length mismatch");
-TU_VERIFY_STATIC(USB2SPDIF_UAC1_AUDIO_DESC_LEN == 107, "unexpected UAC1 audio block length");
+TU_VERIFY_STATIC(PICOI2S_UAC1_AUDIO_DESC_LEN == 107, "unexpected UAC1 audio block length");
 
 //--------------------------------------------------------------------+
 // Configuration descriptor
 //--------------------------------------------------------------------+
 
 #define CONFIG_TOTAL_LEN \
-    (TUD_CONFIG_DESC_LEN + USB2SPDIF_AUDIO_DESC_LEN + TUD_RPI_RESET_DESC_LEN)
+    (TUD_CONFIG_DESC_LEN + PICOI2S_AUDIO_DESC_LEN + TUD_RPI_RESET_DESC_LEN)
 
 #define CONFIG_ATTR_BUS_POWERED 0x00
 #define CONFIG_MAX_POWER_MA     100
@@ -359,7 +359,7 @@ TU_VERIFY_STATIC(USB2SPDIF_UAC1_AUDIO_DESC_LEN == 107, "unexpected UAC1 audio bl
         /*_total_len*/ CONFIG_TOTAL_LEN,                                      \
         /*_attribute*/ CONFIG_ATTR_BUS_POWERED,                               \
         /*_power_ma*/  CONFIG_MAX_POWER_MA),                                  \
-    USB2SPDIF_AUDIO_FUNCTION_DESCRIPTOR(_fbsize),                             \
+    PICOI2S_AUDIO_FUNCTION_DESCRIPTOR(_fbsize),                             \
     TUD_RPI_RESET_DESCRIPTOR(ITF_NUM_RESET, STRID_RESET)
 
 static uint8_t const desc_configuration[] = {
@@ -377,7 +377,7 @@ TU_VERIFY_STATIC(sizeof(desc_configuration_apple) == CONFIG_TOTAL_LEN,
 TU_VERIFY_STATIC(CONFIG_TOTAL_LEN == 214, "unexpected configuration length");
 
 #define CONFIG_TOTAL_LEN_UAC1 \
-    (TUD_CONFIG_DESC_LEN + USB2SPDIF_UAC1_AUDIO_DESC_LEN + TUD_RPI_RESET_DESC_LEN)
+    (TUD_CONFIG_DESC_LEN + PICOI2S_UAC1_AUDIO_DESC_LEN + TUD_RPI_RESET_DESC_LEN)
 
 static uint8_t const desc_configuration_uac1[] = {
     TUD_CONFIG_DESCRIPTOR(
@@ -387,7 +387,7 @@ static uint8_t const desc_configuration_uac1[] = {
         /*_total_len*/ CONFIG_TOTAL_LEN_UAC1,
         /*_attribute*/ CONFIG_ATTR_BUS_POWERED,
         /*_power_ma*/  CONFIG_MAX_POWER_MA),
-    USB2SPDIF_UAC1_AUDIO_FUNCTION_DESCRIPTOR,
+    PICOI2S_UAC1_AUDIO_FUNCTION_DESCRIPTOR,
     TUD_RPI_RESET_DESCRIPTOR(ITF_NUM_RESET, STRID_RESET)
 };
 
@@ -445,7 +445,7 @@ uint8_t const *tud_descriptor_configuration_cb(uint8_t index)
 
 #define USB_LANGID_EN_US        0x0409
 
-// Unique board ID as hex, so several bridges get distinct instances.
+// Unique board ID as hex, so several boards get distinct instances.
 static char serial_str[2 * PICO_UNIQUE_BOARD_ID_SIZE_BYTES + 1];
 
 // ASCII only; each byte becomes one UTF-16 code unit.
@@ -500,7 +500,7 @@ uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid)
     if (index == STRID_CONFIG) {
         return hidden_string_desc(monitor_config_string());
     }
-#if USB2SPDIF_SELFTEST
+#if PICOI2S_SELFTEST
     if (index == STRID_SELFTEST) {
         return hidden_string_desc(selftest_string());
     }

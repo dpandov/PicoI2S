@@ -51,9 +51,9 @@ def find_output():
     wasapi = next(i for i, h in enumerate(sd.query_hostapis()) if "WASAPI" in h["name"])
     for i, d in enumerate(sd.query_devices()):
         if (d["hostapi"] == wasapi and d["max_output_channels"] >= 2 and
-                ("USB to S/PDIF" in d["name"] or "USB to SPDIF" in d["name"])):
+                ("Pico USB to I2S" in d["name"] or "Pico I2S" in d["name"])):
             return i
-    sys.exit("usb2spdif WASAPI output not found")
+    sys.exit("PicoI2S WASAPI output not found")
 
 
 def tone(rate, bits):
@@ -114,7 +114,7 @@ def main():
     backend = libusb_package.get_libusb1_backend()
     status = read_diag(backend).split("| ")[-1]
     if status.startswith("<"):
-        sys.exit(f"usb2spdif not found: {status}")
+        sys.exit(f"PicoI2S not found: {status}")
     uac1 = status_fields(status)["uac1"]
     rates, bits_list = (UAC1_RATES, UAC1_BITS) if uac1 else (RATES, BITS)
     print(f"device in {'UAC1' if uac1 else 'UAC2'} mode: {status}")

@@ -1,4 +1,4 @@
-// Plays the usb2spdif self-test pattern (src/selftest/selftest_pattern.h)
+// Plays the PicoI2S self-test pattern (src/selftest/selftest_pattern.h)
 // through WASAPI in exclusive, event-driven mode, then a little silence so
 // the stream ends cleanly. Bit-exact, unlike PortAudio's exclusive mode.
 // Windows only; built by tools/selftest.py:
@@ -9,7 +9,7 @@
 // Usage: wasapi_play <rate> <16|24> <seconds> [device name part]
 //        wasapi_play --set-volume-max [device name part]
 // The device is the first active render endpoint whose name contains the
-// given part (default: the bridge's name in either mode). Ctrl+C ends the
+// given part (default: the device's name in either mode). Ctrl+C ends the
 // pattern early.
 //
 // The device has a volume control (Feature Unit), which Windows applies in
@@ -38,8 +38,8 @@
 
 enum { EXIT_OK = 0, EXIT_USAGE, EXIT_NO_DEVICE, EXIT_SETUP, EXIT_PLAYBACK, EXIT_VOLUME };
 
-#define DEFAULT_DEVICE      L"USB to S/PDIF"     // UAC2 mode
-#define DEFAULT_DEVICE_UAC1 L"USB to SPDIF"
+#define DEFAULT_DEVICE      L"Pico USB to I2S"   // UAC2 mode
+#define DEFAULT_DEVICE_UAC1 L"Pico I2S"
 #define TRAILING_BUFFERS    4u
 #define EVENT_TIMEOUT_MS    2000u
 

@@ -63,7 +63,7 @@
 //          B<bad> G<gaps> K<skip> [@<n>:<exp>><L>/<R>]
 //
 //   fmt    output format from the format jumpers, i2s_format_name(): i2s,
-//          lj, rj16 (rj24 with USB2SPDIF_RJ24), tda1541a, dual16, dual18,
+//          lj, rj16 (rj24 with PICOI2S_RJ24), tda1541a, dual16, dual18,
 //          dual20, dual24 (in every state)
 //   flt    filter of the output (every state): for the dual-line formats
 //          the filter jumpers' i2s_filter_name() with the oversampling of

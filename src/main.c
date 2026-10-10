@@ -1,4 +1,4 @@
-// usb2spdif - USB to S/PDIF bridge for the RP2350.
+// PicoI2S - USB audio to I2S, dual-line and S/PDIF for the RP2350.
 
 #include "pico/stdlib.h"
 #include "pico/multicore.h"
@@ -16,7 +16,7 @@
 #include "spdif/spdif_rx.h"
 #include "spdif/spdif_tx.h"
 #include "usb/usb_audio.h"
-#if USB2SPDIF_SELFTEST
+#if PICOI2S_SELFTEST
 #include "selftest/selftest.h"
 #endif
 
@@ -57,7 +57,7 @@ static void read_jumpers(usb_audio_mode_t *mode, i2s_format_t *format, unsigned 
 static void core1_main(void) {
     for (;;) {
         i2s_tx_core1_task();
-#if USB2SPDIF_SELFTEST
+#if PICOI2S_SELFTEST
         selftest_task();
 #endif
     }
@@ -81,15 +81,15 @@ int main(void) {
     status_led_init();
     spdif_tx_init(SPDIF_PIN);
     i2s_tx_init(i2s_format, i2s_filter);
-#if !USB2SPDIF_TEST_TONE
+#if !PICOI2S_TEST_TONE
     spdif_rx_init(SPDIF_IN_COAX_PIN, SPDIF_IN_TOSLINK_PIN);
 #endif
-#if USB2SPDIF_SELFTEST
+#if PICOI2S_SELFTEST
     selftest_init();
 #endif
     multicore_launch_core1(core1_main);
 
-#if USB2SPDIF_TEST_TONE
+#if PICOI2S_TEST_TONE
     spdif_tx_start(TEST_TONE_SAMPLE_RATE, 24, test_tone_source, 0);
 #else
     audio_pipeline_init();
@@ -106,7 +106,7 @@ int main(void) {
         diag_loop();
         diag_mark(DIAG_MARK_TUD_TASK);
         tud_task();
-#if USB2SPDIF_TEST_TONE
+#if PICOI2S_TEST_TONE
         audio_pipeline_source_t source = {0};
 #else
         diag_mark(DIAG_MARK_SPDIF_RX);
