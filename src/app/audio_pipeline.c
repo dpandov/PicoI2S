@@ -35,6 +35,13 @@
 #define INPUT_FRAME_BYTES 8u
 // Ramped attenuation value for silence (mute): one step below -64 dB.
 #define ATT_SILENT    (USB_AUDIO_ATT_MAX_DB + 1u)
+// A source switch fades the outgoing source out and the incoming one in,
+// this many dB per chunk: 11 chunks between silence and 0 dB, 22 ms at
+// 48 kHz.
+#define FADE_DB       6u
+// The take-back switches once the faded-out input has left the DMA buffers
+// and the I2S path (one block plus the filter's group delay).
+#define HANDOVER_FRAMES (DMA_FRAMES + 2u * SPDIF_TX_BUFFER_FRAMES)
 
 _Static_assert((RING_FRAMES & RING_MASK) == 0, "ring size must be a power of two");
 _Static_assert(RING_TARGET <= RING_FRAMES, "ring target exceeds the ring");
@@ -72,6 +79,7 @@ typedef struct {
     uint32_t streams;
     uint32_t frames;
     uint8_t  att;             // attenuation applied to the ring, 0 .. ATT_SILENT
+    bool     fade_in;         // the next USB start fades in (take-back)
     uint32_t start_failures;
     uint32_t overruns_base;   // counts when the stream started
     uint32_t late_irqs_base;
@@ -89,6 +97,9 @@ typedef struct {
     bool     fresh;           // input changed: restart the servo, not resume it
     bool     hold;            // the output failed to start at generation hold_gen
     uint32_t hold_gen;
+    bool     handover;        // fading out for the USB take-back
+    bool     faded;           // silent from ring index faded_wr on
+    uint32_t faded_wr;
 } input_t;
 
 static input_t in;
@@ -179,24 +190,42 @@ static uint8_t att_target(usb_audio_volume_t v) {
     return v.mute ? (uint8_t)ATT_SILENT : v.att_db;
 }
 
-// Moves the applied attenuation 1 dB towards the target, once per chunk
-// (96 frames when steady, 2 ms at 48 kHz), so a jump or a mute fades as on
-// the PCM2704.
-static void att_step(uint8_t target) {
+// Moves the applied attenuation up to step dB towards the target, once per
+// chunk (96 frames when steady, 2 ms at 48 kHz). The host volume moves 1 dB
+// per chunk, so a jump or a mute fades as on the PCM2704.
+static void att_step(uint8_t target, uint8_t step) {
     if (p.att < target) {
-        p.att++;
+        p.att = (uint8_t)(target - p.att > step ? p.att + step : target);
     } else if (p.att > target) {
-        p.att--;
+        p.att = (uint8_t)(p.att - target > step ? p.att - step : target);
     }
 }
 
-// Attenuates or mutes n frames just written at ring index wr.
-static void apply_volume(uint32_t wr, uint32_t n, uint8_t att) {
-    int32_t gain = att == ATT_SILENT ? 0 : gain_q31[att];
+static int32_t att_gain(uint8_t att) {
+    return att == ATT_SILENT ? 0 : gain_q31[att];
+}
+
+// Attenuates or mutes n frames just written at ring index wr, the gain
+// moving linearly from att0's to att1's across them, so a ramp step has no
+// edge.
+static void apply_volume(uint32_t wr, uint32_t n, uint8_t att0, uint8_t att1) {
+    int32_t gain = att_gain(att0);
+    int32_t step = (att_gain(att1) - gain) / (int32_t)n;
     for (uint32_t i = 0; i < n; i++) {
+        gain += step;
         uint32_t k = ((wr + i) & RING_MASK) * 2u;
         ring[k]      = scale_sample(ring[k], gain);
         ring[k + 1u] = scale_sample(ring[k + 1u], gain);
+    }
+}
+
+// Ramps the n frames just written at ring index wr one step towards the
+// target attenuation. Untouched at 0 dB (bit-perfect).
+static void ramp_chunk(uint32_t wr, uint32_t n, uint8_t target, uint8_t step) {
+    uint8_t att0 = p.att;
+    att_step(target, step);
+    if (att0 != 0 || p.att != 0) {
+        apply_volume(wr, n, att0, p.att);
     }
 }
 
@@ -268,9 +297,9 @@ static uint32_t pump(const usb_audio_format_t *f, uint64_t now) {
                 ring[k + 1u] = rx.s32[2u * i + 1u];
             }
         }
-        att_step(target);
-        if (p.att != 0) {
-            apply_volume(wr, n, p.att);
+        ramp_chunk(wr, n, target, p.fade_in ? FADE_DB : 1u);
+        if (p.att == target) {
+            p.fade_in = false;
         }
         ring_set_flags(wr, n, 0);
         // What goes out on the line: a muted stream is digital silence.
@@ -373,6 +402,7 @@ static void stream_started(const usb_audio_format_t *f, uint64_t now) {
         return;
     }
     p.playing = false;
+    p.fade_in = false;
     stats_reset();
     // An opening stream counts as audio, so a running output is not stopped
     // during its pre-roll.
@@ -427,9 +457,10 @@ static void play_begun(void) {
 // Pre-roll done: fill the ring and start the output if it is stopped.
 static void begin_playing(const usb_audio_format_t *f, uint64_t now) {
     bool start = !spdif_tx_running();
-    // Starts at the requested volume without a ramp: silence precedes it
-    // (pre-roll, underrun or stopped output).
-    p.att = att_target(usb_audio_volume());
+    // Silence precedes it (pre-roll, underrun or stopped output), so it
+    // starts at the requested volume, unless it takes the output back from
+    // the input in the middle of its signal.
+    p.att = p.fade_in ? (uint8_t)ATT_SILENT : att_target(usb_audio_volume());
     if (start) {
         clock_follow(f->sample_rate);
     }
@@ -561,8 +592,9 @@ static uint8_t input_word_bits(void) {
     return in.st.word_bits <= 16u ? 16u : 24u;
 }
 
-// Moves input frames into the ring, up to RING_TARGET, unchanged (0 dB,
-// bit-perfect), each chunk with its emphasis flag. Returns the count.
+// Moves input frames into the ring, up to RING_TARGET, each chunk with its
+// emphasis flag. Unchanged (bit-perfect) except while fading in after a
+// start or out for the take-back. Returns the count.
 static uint32_t pump_input(uint64_t now) {
     uint32_t moved = 0;
     for (;;) {
@@ -587,6 +619,11 @@ static uint32_t pump_input(uint64_t now) {
             break;
         }
         ring_set_flags(wr, n, (rx_flags & SPDIF_RX_FLAG_EMPHASIS) ? SPDIF_TX_FLAG_EMPHASIS : 0u);
+        ramp_chunk(wr, n, in.handover ? (uint8_t)ATT_SILENT : 0u, FADE_DB);
+        if (in.handover && !in.faded && p.att == ATT_SILENT) {
+            in.faded = true;
+            in.faded_wr = wr + n;
+        }
         if (chunk_has_signal(wr, n)) {
             p.last_signal_us = now;
             p.had_signal = true;
@@ -622,6 +659,8 @@ static void input_set_rate(uint32_t sample_rate) {
 // in either USB mode.
 static void begin_input(uint64_t now) {
     bool start = !spdif_tx_running();
+    // The input is joined in the middle of its signal: fade in.
+    p.att = ATT_SILENT;
     top_up_input(now);
     if (start) {
         if (!output_start(in.rate, input_word_bits(),
@@ -708,17 +747,29 @@ static void switch_source(source_t src, uint64_t now) {
     p.last_audio_us = now;
     in.input = SPDIF_RX_NONE;
     in.rate = 0;
+    in.handover = false;
     stats_reset();
 }
 
+// The faded-out input has played out on every output.
+static bool input_faded(void) {
+    return in.faded && ring_rd - in.faded_wr >= HANDOVER_FRAMES;
+}
+
 // USB has priority: the input takes the output after USB_IDLE_US without
-// an audible USB sample, and the first one takes it back.
+// an audible USB sample, and the first one takes it back once the input
+// has faded out. The USB stream is drained meanwhile, then fades in.
 static void arbitrate(bool open, const usb_audio_format_t *f, uint64_t now) {
     if (p.src == SRC_INPUT) {
-        if (open && usb_drain(f)) {
+        if (open && usb_drain(f) && !in.handover) {
             p.usb_heard_us = now;
+            in.handover = true;
+            in.faded = false;
+        }
+        if (in.handover && (!p.playing || input_faded())) {
             log_printf("pipe: source usb\n");
             switch_source(SRC_USB, now);
+            p.fade_in = true;
         }
     } else if (input_ready() && now - p.usb_heard_us >= USB_IDLE_US) {
         log_printf("pipe: source %s %lu Hz\n", input_name(in.st.input),

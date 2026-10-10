@@ -116,7 +116,10 @@ tools); `CLAUDE.md` holds the working rules and the current status.
   chunk is published (`sync_word_bits()`).
 - Ramp like the PCM2704: the applied attenuation moves 1 dB per chunk
   (up to 96 frames) towards the target, so jumps, mute and unmute fade; a
-  new stream starts at the target. The diag token `v<dB>` / `vM` shows the
+  new stream starts at the target. Within a chunk the Q31 gain moves
+  linearly from the previous step's to the new one (`apply_volume()`), so
+  a step has no edge. The source-switch fades use the same ramp at 6 dB
+  per chunk (`FADE_DB`). The diag token `v<dB>` / `vM` shows the
   target. Volume applies to every output (it is in the ring).
 
 ## Trim pacer (`src/spdif/spdif_pacer.pio`, `spdif_trim.h`)
@@ -338,9 +341,15 @@ the wrong pattern wrap; the locate key skips silent and clipped frames.
   3 s after the last audible USB sample (non-zero after the volume; boot
   counts as USB activity) once an input is selected with known channel
   status; meanwhile an open USB stream is drained to its set point, and
-  its first audible chunk takes the output back (that chunk is dropped).
-  The input gives the output up 3 s after its last frame. Every switch
-  stops the output and pre-rolls the new source. A generation change is a
+  its first audible chunk starts the take-back: the input fades to
+  silence at 6 dB per chunk (11 chunks, 22 ms at 48 kHz) while USB keeps
+  being drained, and once the faded samples have left the DMA buffers and
+  the I2S path (`HANDOVER_FRAMES`, 384 frames) the output switches. The
+  input gives the output up 3 s after its last frame. Every switch stops
+  the output and pre-rolls the new source, which fades in from silence
+  (the input always, since it is joined mid-signal; USB after a
+  take-back). Without the fades a switch left a dual-line DAC holding the
+  last sample and restarted mid-signal: audible clicks. A generation change is a
   stall: a relock at the same rate resumes, another rate restarts.
 - Clocking, option A: the clock servo steers the output to the input in
   both USB modes, fed with the receiver FIFO level (set point 6 ms),
@@ -376,7 +385,11 @@ the wrong pattern wrap; the locate key skips silent and clipped frames.
 
 - Diagnostic string (`tools/diag.py`, `src/diag/diag.h`): panics, hard
   faults and main-loop hangs from the previous boot plus live status,
-  95 characters.
+  95 characters. The record lives in watchdog scratch 0..3 and survives
+  the watchdog reset. A boot through the boot ROM (flash update, BOOTSEL)
+  discards it: the ROM's reboot call leaves its parameters in scratch 2
+  and 3, which picotool 2.1.1's flash-update reboot once showed as a
+  false `? m2 pc10000000`.
 - Session string (0x23, `app/monitor.c`): streams, frames, digital
   silence age (after the volume), uptime, late filter blocks, and for the
   input `src`, `in`, `ir<rate><ppm>`, `cs<bits>[e][n]`,
@@ -451,7 +464,9 @@ MCLK meter.
 - S/PDIF input: end to end with a test transmitter (5 rates x +-1000 ppm
   in both modes, emphasis, non-PCM, dropouts, rate changes, all
   arbitration cases; lock 18..29 ms, take-back 22..36 ms, output off at
-  3.0 s); a real Eversolo source on Toslink (44.1 / 48 / 96 kHz, rate
+  3.0 s; with the source fades, scenarios A to D again in UAC1, take-back
+  50 ms after the stream opens, both sources bit-exact once the fade
+  ends); a real Eversolo source on Toslink (44.1 / 48 / 96 kHz, rate
   changes relock within a second, zero errors, its clock -102 ppm); the
   board's own Toslink output looped into its input.
 - Soaks, all with zero events (no underrun, overrun, late interrupt or
@@ -482,15 +497,12 @@ MCLK meter.
 - A rate change without a signal gap on the input (44.1 <-> 48) plays a
   few ms of new-rate frames at the old rate before the 16 ms re-check
   unlocks, and counts a few hundred receiver errors.
-- The take-back from the input drops the first audible USB chunk (up to
-  2 ms).
+- The take-back from the input drops the USB audio that arrives while the
+  input fades out and plays out (1440 frames, 30 ms at 48 kHz): the USB
+  FIFO cannot hold it at every rate.
 - The silence tail after an emphasized input keeps the emphasis flag.
 - With the output looped into an input and a USB stream open but silent,
   the output cycles every 3 s (the input takes it, which stops its own
   source). A test setup only.
 - The trimmed modes carry the pacer's phase error on the I2S clocks (see
   the trim pacer).
-- After a flash with picotool 2.1.1 (Debian; two-step reflash) the
-  previous-boot record reads `? m2 pc10000000`: the boot ROM's
-  flash-update reboot keeps its parameters in watchdog scratch 2 and 3,
-  which the diagnostics use. Not a crash.

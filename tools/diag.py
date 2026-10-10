@@ -9,7 +9,7 @@ picotool reset interface, which Windows binds to WinUSB automatically.
     python tools/diag.py 10         # ten readings, one per second
 
 Output fields:
-    b<N>        boot count since power-up
+    b<N>        boot count since power-up or the last flash
     none/...    how the previous boot ended: none, panic, fault, hang, wdog
     m<N>        (after a crash) last breadcrumb, see DIAG_MARK_* in src/diag/diag.h
     pc / lr     (after a crash) code address of the panic message, fault or hang

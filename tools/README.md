@@ -295,7 +295,7 @@ UAC1:  b1 none | S1 44100/16 ff4935 ur0 run1 led1 tx44100 ov0 lt0 rmin144 fmax54
 
 | Token | Meaning |
 |---|---|
-| `b<N>` | boot count since power-up |
+| `b<N>` | boot count since power-up or the last flash |
 | `none` / `panic` / `fault` / `hang` / `wdog` | how the previous boot ended |
 | `m<N>` | (after a crash) last breadcrumb, `DIAG_MARK_*` in `src/diag/diag.h` |
 | `pc` / `lr` | (after a crash) code address of the panic message, fault or hang |

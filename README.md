@@ -317,7 +317,10 @@ signal, coax plays; a coax signal that appears takes over from Toslink.
 - USB has priority. USB counts as not available after 3 s without an
   audible sample: no host, no stream, a stalled stream, or a stream of
   digital silence (some hosts keep one open). The first audible USB sample
-  takes the output back. A switch mutes briefly.
+  takes the output back. Switches fade instead of clicking: the input
+  fades out (about 20 ms at 48 kHz) before USB takes over, and the new
+  source fades in from silence; the fade ends at exactly 0 dB, so the
+  samples are bit-exact again right after it.
 - The output clock follows the source: the Pico keeps its own crystal and
   steers the output rate to the input's (as in UAC1 mode), so the samples
   stay bit-exact and the source's jitter does not reach the DACs.
@@ -460,8 +463,9 @@ Android also use it when present.
   attenuated 16-bit sample has more than 16 significant bits). Volume
   changes never interrupt the output.
 - Changes ramp towards the new level by 1 dB per chunk of about 2 ms, like
-  the PCM2704, so a large jump, a mute or an unmute fades instead of
-  stepping; a new stream starts at the current level.
+  the PCM2704, with the gain moving smoothly within each chunk, so a large
+  jump, a mute or an unmute fades instead of stepping; a new stream starts
+  at the current level.
 - Mute fades to digital silence; the stream still counts as audio (LED on,
   output running).
 - 0 dB, unmuted at power-up and on every connection; hosts then set their

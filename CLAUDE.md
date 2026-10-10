@@ -156,8 +156,8 @@ Pending:
   features a self-test loopback (S/PDIF out to an input pin) and a
   self-test transmitter with the emphasis flag.
 - Ideas: a keep-clocks-running option for DACs that dislike clock loss;
-  a faster unlock on a gapless input rate change; no dropped chunk on
-  the USB take-back. Known limitations are listed in `DESIGN.md`.
+  a faster unlock on a gapless input rate change; keeping the USB audio
+  that arrives during the take-back fade. Known limitations are listed in `DESIGN.md`.
 
 ## Known TinyUSB issues (0.21.0)
 
