@@ -579,6 +579,17 @@ switched) or the source switches between USB and the S/PDIF input; the
 3-s stop check of `tools/selftest.py` then expects the I2S output silent
 instead of stopped.
 
+### Version
+
+The firmware version is set in `CMakeLists.txt` (`project(PicoI2S VERSION
+1.4 ...)`, shown as 1.04 and reported to the host as the USB device
+release). Every build also records a build number (the commit count of
+the checked-out branch), the commit, whether there were uncommitted
+changes, and the build time. `tools/monitor.py` and `tools/diag.py` show
+them from the running device, and `picotool info build/PicoI2S.uf2`
+from the file, e.g. "1.04 build 21 3f2a9c1" ("-dirty" with uncommitted
+changes). A build from a source archive without git reports build 0.
+
 ## Flashing
 
 First time: hold BOOT while plugging in the board, then copy

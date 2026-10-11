@@ -28,7 +28,9 @@ endif()
 # Pull in the Pico SDK (must happen before project()).
 include(pico_sdk_import.cmake)
 
-project(PicoI2S C CXX ASM)
+# Firmware version major.minor: shown as 1.04, also the USB bcdDevice
+# (0x0104). Bump it on every release and every descriptor change.
+project(PicoI2S VERSION 1.4 LANGUAGES C CXX ASM)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
 
@@ -42,6 +44,7 @@ add_executable(PicoI2S
     src/app/monitor.c
     src/app/status_led.c
     src/app/test_tone.c
+    src/app/version.c
     src/clock/audio_clock.c
     src/diag/diag.c
     src/i2s/i2s_tx.c
@@ -56,6 +59,33 @@ add_executable(PicoI2S
 pico_generate_pio_header(PicoI2S ${CMAKE_CURRENT_LIST_DIR}/src/spdif/spdif_tx.pio)
 pico_generate_pio_header(PicoI2S ${CMAKE_CURRENT_LIST_DIR}/src/spdif/spdif_pacer.pio)
 pico_generate_pio_header(PicoI2S ${CMAKE_CURRENT_LIST_DIR}/src/spdif/spdif_rx.pio)
+
+# Build number, commit and build time, refreshed at every build
+# (cmake/version.cmake); only src/app/version.c includes the header.
+find_package(Git QUIET)
+set(PICOI2S_GENERATED ${CMAKE_CURRENT_BINARY_DIR}/generated)
+add_custom_target(PicoI2S_version
+    COMMAND ${CMAKE_COMMAND} -DOUT=${PICOI2S_GENERATED}/picoi2s_build.h
+            -DSRC=${CMAKE_CURRENT_LIST_DIR} -DGIT=${GIT_EXECUTABLE}
+            -P ${CMAKE_CURRENT_LIST_DIR}/cmake/version.cmake
+    COMMENT "Build identity"
+    BYPRODUCTS ${PICOI2S_GENERATED}/picoi2s_build.h
+    VERBATIM)
+add_dependencies(PicoI2S PicoI2S_version)
+target_include_directories(PicoI2S PRIVATE ${PICOI2S_GENERATED})
+string(LENGTH "${PROJECT_VERSION_MINOR}" minor_len)
+if(minor_len EQUAL 1)
+    set(PICOI2S_VERSION_TEXT "${PROJECT_VERSION_MAJOR}.0${PROJECT_VERSION_MINOR}")
+else()
+    set(PICOI2S_VERSION_TEXT "${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}")
+endif()
+target_compile_definitions(PicoI2S PRIVATE
+    PICOI2S_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
+    PICOI2S_VERSION_MINOR=${PROJECT_VERSION_MINOR}
+    PICOI2S_VERSION_TEXT="${PICOI2S_VERSION_TEXT}"
+    PICO_NO_BI_PROGRAM_BUILD_DATE=1)
+pico_set_program_description(PicoI2S "USB audio to I2S / dual-line / S/PDIF")
+pico_set_program_url(PicoI2S "https://github.com/dpandov/PicoI2S")
 
 # Includes are written relative to src/ (e.g. "usb/usb_audio.h").
 # TinyUSB includes tusb_config.h by bare name, hence src/usb.

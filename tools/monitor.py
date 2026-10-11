@@ -3,12 +3,15 @@
 Polls the device's diagnostic string (tools/diag.py) and its session string
 a few times per second and prints one timestamped line per event:
 
-    device connected / disconnected / rebooted (with the crash record and
-        the configuration: board, firmware, build, USB mode, output format,
-        filter, jumper states)
+    device connected / disconnected / rebooted (with the uptime, the crash
+        record, the firmware version and build, and the configuration:
+        board, build type, USB mode, output format, filter, jumper states)
     stream opened (format, PCM data rate, volume) / closed / format changed
     playing (stream samples going out) / stalled / underrun
     S/PDIF output on / off (3 s after the audio ended)
+    output state: clk_sys and the clock table's error, I2S oversampling,
+        S/PDIF word length (on every change), de-emphasis on / off, USB
+        packets without whole frames
     digital silence (all-zero samples for --silence seconds) / signal
     volume changes, clock lock (UAC1 and the S/PDIF input), counter increases
     (ov, lt, late I2S blocks)
@@ -20,26 +23,31 @@ a few times per second and prints one timestamped line per event:
 With --status N a status line is printed every N seconds while a stream is
 open or the input plays: format, data rate, the sample rate measured from
 the device's frame counter against the PC clock, FIFO level, ring minimum,
-longest main-loop iteration, trim and the current silence (for the input:
-its rate and offset, word length, emphasis and the silence).
+highest FIFO level, longest main-loop iteration, trim and the current
+silence (for the input: its rate and offset, word length, emphasis, the
+receiver FIFO level and the silence), and the underruns and overruns since
+boot when there were any.
 
     pip install pyusb libusb-package
     python tools/monitor.py                      # until Ctrl+C
     python tools/monitor.py --status 10 --log session.log
     python tools/monitor.py --silence 2 --interval 0.5
 
-Needs the firmware's session string (index 0x23); the configuration
-string (0x24) is optional (older firmware: "not reported"). Short events between two
-polls (a stream opened and closed within --interval) are not seen.
+Needs the firmware's session string (index 0x23); the configuration,
+version and output strings (0x24..0x26) are optional (older firmware:
+"not reported"). Short events between two polls (a stream opened and closed
+within --interval) are not seen.
 """
 import argparse
+import calendar
 import sys
 import time
 
 import libusb_package
 
-from diag import (STRID_CONFIG, STRID_DIAG, STRID_SESSION, parse_config, parse_session,
-                  parse_status, read_diag)
+from diag import (STRID_CONFIG, STRID_DIAG, STRID_OUTPUT, STRID_SESSION, STRID_VERSION,
+                  parse_config, parse_output, parse_session, parse_status, parse_version,
+                  read_diag)
 
 # Measured sample rate: frame counter against the PC clock over this window,
 # reported once half of it is filled. The USB read latency limits it to
@@ -110,15 +118,44 @@ FILTERS = {
 FILTER_CODES = ["nos", "sharp", "slow", "sinc", "minphase"]
 
 
-def config_lines(cfg):
-    """The configuration string's fields as report lines."""
+def version_line(ver):
+    """The version string's fields as one report line."""
+    commit = ver.get("git", "unknown")
+    if ver.get("dirty") == "1":
+        commit += ", uncommitted changes"
+    date = ver.get("date", "?")
+    try:
+        utc = time.strptime(date, "%Y-%m-%dT%H:%MZ")
+        date = time.strftime("%Y-%m-%d %H:%M", time.localtime(calendar.timegm(utc)))
+    except ValueError:
+        pass
+    return (f"firmware {ver.get('ver', '?')} build {ver.get('build', '?')} ({commit}), "
+            f"built {date}, Pico SDK {ver.get('sdk', '?')}, TinyUSB {ver.get('tinyusb', '?')}")
+
+
+def fmt_output(out):
+    """Running output's clock, oversampling and word length."""
+    parts = [f"clk_sys {out['clk_hz'] / 1e6:.6g} MHz"]
+    if out["pll_ppm"] is not None:
+        parts[0] += f" (clock table {out['pll_ppm']:+d} ppm)"
+    if out["osr"] is not None:
+        parts.append(f"I2S {out['osr']}x" if out["osr"] > 1 else "I2S at the sample rate")
+    if out["word_bits"] is not None:
+        parts.append(f"S/PDIF {out['word_bits']}-bit")
+    return ", ".join(parts)
+
+
+def config_lines(cfg, with_fw=True):
+    """The configuration string's fields as report lines (the firmware
+    version unless the version line shows it)."""
     jumpers = cfg.get("jumpers", "?/???/???").split("/")
     mode_j, fmt_j, flt_j = (jumpers + ["?", "???", "???"])[:3]
     fw = cfg.get("fw", "")
     fw = f"{int(fw[:2], 16)}.{fw[2:]}" if len(fw) == 4 and all(c in "0123456789abcdef" for c in fw) else fw
     fmt, flt = cfg.get("format", "?"), cfg.get("filter", "?")
     lines = [
-        f"board {BOARDS.get(cfg.get('board'), cfg.get('board'))}, firmware {fw}, "
+        f"board {BOARDS.get(cfg.get('board'), cfg.get('board'))}, "
+        f"{f'firmware {fw}, ' if with_fw else ''}"
         f"{BUILDS.get(cfg.get('build'), cfg.get('build'))}"
         f"{', DAC clocks kept running' if cfg.get('clocks') == 'keep' else ''}",
         f"USB {cfg.get('mode', '?').upper()} (mode jumper GP5 {'grounded' if mode_j == '1' else 'open'})",
@@ -142,6 +179,8 @@ class Monitor:
         self.log = open(args.log, "a", encoding="utf-8") if args.log else None
         self.prev = None          # last parsed status
         self.sess = None          # last parsed session
+        self.outp = None          # last parsed output state
+        self.outp_new = None
         self.present = None
         self.open_since = None
         self.play_since = None
@@ -167,18 +206,20 @@ class Monitor:
         if st is None:
             return None, None, raw
         se = parse_session(read_diag(self.backend, STRID_SESSION))
+        self.outp_new = parse_output(read_diag(self.backend, STRID_OUTPUT))
         return st, se, raw
 
     # ---- events ---------------------------------------------------------
 
-    def device_change(self, st, raw):
+    def device_change(self, st, se, raw):
         present = st is not None
         if present == self.present:
             return
         if present:
             mode = "UAC1" if st["uac1"] else "UAC2"
             host = {"a": "Apple host", "o": "non-Apple host", "1": "adaptive"}[st["host"]]
-            self.out(f"device connected: {mode}, {host}, boot {st['boots']}")
+            up = f", up {fmt_duration(se['up_ms'] / 1000)}" if se else ""
+            self.out(f"device connected: {mode}, {host}, boot {st['boots']}{up}")
             if st["prev"] != "none":
                 self.out(f"  previous boot ended in: {st['prev']} ({raw.split(' | ')[0]})")
             self.config_report()
@@ -372,12 +413,32 @@ class Monitor:
             self.input_since = None
             self.config_report()
 
+    def output_events(self, out):
+        """Output clock, oversampling and word length; de-emphasis; bad
+        USB packets."""
+        if out is None:
+            return
+        q = self.outp
+        key = (out["clk_hz"], out["pll_ppm"], out["osr"], out["word_bits"])
+        on = out["pll_ppm"] is not None
+        if on and (q is None or key != (q["clk_hz"], q["pll_ppm"], q["osr"], q["word_bits"])):
+            self.out(f"output: {fmt_output(out)}")
+        if out["emphasis"] != (q["emphasis"] if q else False):
+            self.out("de-emphasis on: S/PDIF flagged, I2S / dual-line de-emphasised"
+                     if out["emphasis"] else "de-emphasis off")
+        if q and out["bad_packets"] > q["bad_packets"]:
+            self.out(f"USB packets without whole frames: +{out['bad_packets'] - q['bad_packets']} "
+                     f"({out['bad_packets']} since boot)")
+
     def config_report(self):
+        ver = parse_version(read_diag(self.backend, STRID_VERSION))
+        self.out(f"  config: {version_line(ver)}" if ver else
+                 "  config: version not reported (firmware without the version string)")
         cfg = parse_config(read_diag(self.backend, STRID_CONFIG))
         if cfg is None:
             self.out("  config: not reported (firmware without the configuration string)")
             return
-        for line in config_lines(cfg):
+        for line in config_lines(cfg, with_fw=ver is None):
             self.out(f"  config: {line}")
 
     # ---- measured rate and status ---------------------------------------
@@ -410,8 +471,11 @@ class Monitor:
         self.last_status_t = now
         if on_input:
             parts = [f"{INPUTS[se['source']]} input", fmt_input(se)]
+            if self.outp and self.outp["rx_level"] is not None:
+                parts.append(f"receiver FIFO {self.outp['rx_level']} frames")
             if self.silent_since is not None:
                 parts.append(f"silence {fmt_duration(now - self.silent_since)}")
+            parts += self.totals()
             self.out("status: " + ", ".join(parts))
             return
         f = st["fields"]
@@ -420,7 +484,7 @@ class Monitor:
         if rate is not None:
             parts.append(f"measured {rate:.1f} Hz ({(rate / st['rate'] - 1) * 1e6:+.0f} ppm)")
         parts.append("playing" if f.get("run") else "not playing")
-        parts.append(f"fifo {f.get('ff', 0)} B")
+        parts.append(f"fifo {f.get('ff', 0)} B (max {f.get('fmax', 0)})")
         parts.append(f"ring min {f.get('rmin', 0)}")
         parts.append(f"loop {f.get('lp', 0) / 1000:.2f} ms")
         if st["trim"] is not None:
@@ -428,21 +492,31 @@ class Monitor:
         parts.append(fmt_volume(st["volume"]))
         if self.silent_since is not None:
             parts.append(f"silence {fmt_duration(now - self.silent_since)}")
+        parts += self.totals()
         self.out("status: " + ", ".join(parts))
+
+    def totals(self):
+        o = self.outp
+        if not o or not (o["underruns"] or o["overruns"]):
+            return []
+        return [f"since boot {o['underruns']} underruns, {o['overruns']} overruns"]
 
     # ---- loop -----------------------------------------------------------
 
     def step(self):
         now = time.monotonic()
         st, se, raw = self.read()
-        self.device_change(st, raw)
+        self.device_change(st, se, raw)
         if st is None:
-            self.prev, self.sess = None, None
+            self.prev, self.sess, self.outp = None, None, None
             return
         self.reboot_events(st, raw)
         self.stream_events(st, se, now)
         self.input_events(se, now)
         self.silence_events(st, se, now)
+        self.output_events(self.outp_new)
+        if self.outp_new is not None:
+            self.outp = self.outp_new
         self.track_frames(st, se, now)
         self.status_line(st, se, now)
         self.prev, self.sess = st, se

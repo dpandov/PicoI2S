@@ -56,6 +56,11 @@ Jumpers have pull-ups, are read once at boot, grounded = 1.
 - TinyUSB 0.21.0 is the submodule `lib/tinyusb` (release tag), passed as
   `PICO_TINYUSB_PATH`; the SDK's bundled copy is not used. After cloning:
   `git submodule update --init`.
+- Version: `project(PicoI2S VERSION x.y)` in `CMakeLists.txt`, shown as
+  x.0y and also the USB bcdDevice: bump it on every release and every
+  descriptor change (Windows caches descriptors per bcdDevice). The build
+  number (commit count), commit and build time come from
+  `cmake/version.cmake` at every build (version string 0x25).
 - `PICO_BOARD=pico2` for both boards; the wiring is `PICOI2S_BOARD`
   (`rp2350-one`, default, or `pico2`). Build options: `PICOI2S_SELFTEST`,
   `PICOI2S_TEST_TONE`, `PICOI2S_RJ24`, `PICOI2S_KEEP_CLOCKS`.
@@ -113,10 +118,11 @@ generated analysis go in `scratch/` at the repository root. This folder and
 
 - One folder per subsystem: `src/main.c` (init and main loop only),
   `src/board_config.h` (pins), `src/usb/` (descriptors and every `tud_*`
-  callback), `src/app/` (pipeline, clock servo, LED, monitor strings),
+  callback), `src/app/` (pipeline, clock servo, LED, monitor strings, version),
   `src/diag/`, `src/spdif/` (transmitter, trim pacer, receiver),
   `src/i2s/` (I2S / dual-line transmitter, filters, de-emphasis),
-  `src/clock/` (PLL per rate), `src/selftest/`, `tools/` (host scripts).
+  `src/clock/` (PLL per rate), `src/selftest/`, `tools/` (host scripts),
+  `cmake/` (build scripts).
 - Includes are relative to `src/` (`#include "usb/usb_audio.h"`).
 - Do not mix TinyUSB callbacks with PIO / DMA code.
 - Prefer integer arithmetic in the audio path; no floating point in

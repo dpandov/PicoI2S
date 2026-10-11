@@ -90,6 +90,41 @@ tools/monitor.py) carries the configuration, fixed at boot:
     keep with the PICOI2S_KEEP_CLOCKS build, whose I2S / dual-line clocks
     keep running with silence (S/PDIF still stops; tx follows S/PDIF).
     e.g. board=rp2350-one fw=0104 build=normal mode=uac2 format=i2s filter=nos jumpers=0/000/000 clocks=stop
+
+A fourth hidden string (index 0x25) identifies the firmware build:
+
+    ver=<major.minor> build=<N> git=<commit> dirty=<0|1> date=<UTC time>
+        sdk=<Pico SDK version> tinyusb=<TinyUSB version>
+
+    ver is the version in CMakeLists.txt (also fw, the USB bcdDevice);
+    build is the number of commits in HEAD, git the commit, dirty 1 when
+    the tracked files differed from it at build time; date the build time
+    (UTC). Without git: build=0 git=unknown.
+    e.g. ver=1.04 build=20 git=ca5ef88 dirty=0 date=2026-10-11T08:13Z sdk=2.3.1 tinyusb=0.21.0
+
+A fifth hidden string (index 0x26) carries the output state, at most 81
+characters:
+
+    clk<Hz> pll<+|-><ppm>|pll- i2s<osr>|i2s- w<bits>|w- e<0|1>
+        rxl<frames>|rxl- urt<N> ovt<N> bad<N>
+
+    clk         clk_sys in Hz (set per sample rate, see the README's clock
+                table)
+    pll         rate error of the running output at zero trim against its
+                nominal rate in ppm (the clock table's), pll- when stopped
+    i2s         I2S / dual-line output frames per sample: 8 or 4 with an
+                oversampling filter, 1 otherwise; i2s- when not running
+    w           S/PDIF word length sent: 16, or 24 (24-bit streams, the
+                volume below 0 dB, the input's channel status); w- stopped
+    e           1 while pre-emphasised input samples go out (S/PDIF flag
+                set, the I2S path de-emphasising)
+    rxl         S/PDIF receiver FIFO level in frames while an input is
+                selected (held at 6 ms while it plays), rxl- otherwise
+    urt, ovt    underruns and overruns since boot
+    bad         USB packets with no data or not whole stereo frames, since
+                boot
+    Totals stop at 999999.
+    e.g. clk147428571 pll-186 i2s8 w24 e0 rxl- urt0 ovt0 bad0
 """
 import re
 import sys
@@ -104,6 +139,8 @@ PIDS = {0x0001: "UAC2", 0x0002: "UAC1"}
 STRID_DIAG = 0x20
 STRID_SESSION = 0x23
 STRID_CONFIG = 0x24
+STRID_VERSION = 0x25
+STRID_OUTPUT = 0x26
 LANGID_EN_US = 0x0409
 
 _INT_TOKEN = re.compile(r"^([a-z]+)(\d+)$")
@@ -222,9 +259,37 @@ def parse_config(s):
     return fields if "board" in fields and "format" in fields else None
 
 
+def parse_version(s):
+    """Version string -> dict of its key=value fields, or None (no device,
+    or firmware without the string)."""
+    fields = dict(t.split("=", 1) for t in s.split() if "=" in t)
+    return fields if "ver" in fields and "build" in fields else None
+
+
+def parse_output(s):
+    """Output state string -> dict, or None if it is not one.
+
+    Keys: clk_hz, pll_ppm (None when stopped), osr (None when the I2S
+    output is not running), word_bits (None when stopped), emphasis,
+    rx_level (None without a selected input), underruns, overruns,
+    bad_packets.
+    """
+    m = re.fullmatch(r"clk(\d+) pll([+-]\d+|-) i2s(\d+|-) w(\d+|-) e([01]) rxl(\d+|-) "
+                     r"urt(\d+) ovt(\d+) bad(\d+)", s.strip())
+    if not m:
+        return None
+    opt = [None if g == "-" else int(g) for g in m.group(2, 3, 4, 6)]
+    return {"clk_hz": int(m.group(1)), "pll_ppm": opt[0], "osr": opt[1], "word_bits": opt[2],
+            "emphasis": m.group(5) == "1", "rx_level": opt[3], "underruns": int(m.group(7)),
+            "overruns": int(m.group(8)), "bad_packets": int(m.group(9))}
+
+
 def main():
     count = int(sys.argv[1]) if len(sys.argv) > 1 else 1
     backend = libusb_package.get_libusb1_backend()
+    version = read_diag(backend, STRID_VERSION)
+    if parse_version(version):
+        print("version:", version)
     config = read_diag(backend, STRID_CONFIG)
     if parse_config(config):
         print("config:", config)
@@ -233,6 +298,9 @@ def main():
         session = read_diag(backend, STRID_SESSION)
         if parse_session(session):
             print("         session:", session)
+        output = read_diag(backend, STRID_OUTPUT)
+        if parse_output(output):
+            print("         output: ", output)
         if i + 1 < count:
             time.sleep(1)
 

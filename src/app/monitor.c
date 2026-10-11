@@ -6,6 +6,7 @@
 #include "app/audio_pipeline.h"
 #include "app/log.h"
 #include "app/status_led.h"
+#include "app/version.h"
 #include "diag/diag.h"
 #include "i2s/i2s_tx.h"
 #include "spdif/spdif_rx.h"
@@ -15,7 +16,7 @@
 
 void monitor_init(void) {
     log_init();
-    log_printf("\nPicoI2S\n");
+    log_printf("\nPicoI2S %s\n", version_short());
     log_printf("clk_sys %lu, clk_peri %lu, clk_usb %lu\n",
                (unsigned long)clock_get_hz(clk_sys),
                (unsigned long)clock_get_hz(clk_peri),
@@ -245,6 +246,63 @@ const char *monitor_session_string(void) {
                  clamp_cnt(rs.locks, max), clamp_cnt(rs.unlocks, max),
                  clamp_cnt(rs.err_parity, max), clamp_cnt(rs.err_frame, max),
                  clamp_cnt(rs.overflows, max));
+    }
+    return buf;
+}
+
+// Format documented in tools/diag.py: "clk<Hz> pll<+|-><ppm>|pll- i2s<osr>|i2s-
+// w<bits>|w- e<0|1> rxl<frames>|rxl- urt<n> ovt<n> bad<n>", at most 81
+// characters (totals capped at 999999).
+const char *monitor_output_string(void) {
+    static char buf[96];
+    audio_pipeline_stats_t ps;
+    audio_pipeline_get_stats(&ps);
+    usb_audio_stats_t us;
+    usb_audio_get_stats(&us);
+    audio_pipeline_source_t src;
+    audio_pipeline_get_source(&src);
+    const uint32_t max = 999999u;
+    bool on = spdif_tx_running();
+
+    int n = snprintf(buf, sizeof(buf), "clk%lu", (unsigned long)clock_get_hz(clk_sys));
+    if (n > 0 && (size_t)n < sizeof(buf)) {
+        if (on) {
+            long ppm = trim_ppm(spdif_tx_rate_error_ppb());
+            n += snprintf(buf + n, sizeof(buf) - (size_t)n, " pll%c%ld", ppm < 0 ? '-' : '+',
+                          ppm < 0 ? -ppm : ppm);
+        } else {
+            n += snprintf(buf + n, sizeof(buf) - (size_t)n, " pll-");
+        }
+    }
+    if (n > 0 && (size_t)n < sizeof(buf)) {
+        if (i2s_tx_running()) {
+            n += snprintf(buf + n, sizeof(buf) - (size_t)n, " i2s%u", i2s_tx_oversampling());
+        } else {
+            n += snprintf(buf + n, sizeof(buf) - (size_t)n, " i2s-");
+        }
+    }
+    if (n > 0 && (size_t)n < sizeof(buf)) {
+        if (on) {
+            n += snprintf(buf + n, sizeof(buf) - (size_t)n, " w%u", spdif_tx_word_bits());
+        } else {
+            n += snprintf(buf + n, sizeof(buf) - (size_t)n, " w-");
+        }
+    }
+    if (n > 0 && (size_t)n < sizeof(buf)) {
+        n += snprintf(buf + n, sizeof(buf) - (size_t)n, " e%d", src.emphasis ? 1 : 0);
+    }
+    if (n > 0 && (size_t)n < sizeof(buf)) {
+        if (src.input.input != SPDIF_RX_NONE) {
+            n += snprintf(buf + n, sizeof(buf) - (size_t)n, " rxl%lu",
+                          (unsigned long)spdif_rx_level());
+        } else {
+            n += snprintf(buf + n, sizeof(buf) - (size_t)n, " rxl-");
+        }
+    }
+    if (n > 0 && (size_t)n < sizeof(buf)) {
+        snprintf(buf + n, sizeof(buf) - (size_t)n, " urt%lu ovt%lu bad%lu",
+                 clamp_cnt(ps.underruns_total, max), clamp_cnt(ps.overruns_total, max),
+                 clamp_cnt(us.bad_packets, max));
     }
     return buf;
 }

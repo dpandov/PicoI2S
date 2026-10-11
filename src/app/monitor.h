@@ -17,6 +17,12 @@
 // tools/monitor.py; format in tools/diag.py.
 #define STRID_CONFIG 0x24
 
+// Hidden USB string index of the output state string, read by
+// tools/monitor.py: clk_sys and the output's PLL error, the I2S
+// oversampling, the S/PDIF word length and emphasis flag, the receiver
+// FIFO level, and totals since boot. Format in tools/diag.py.
+#define STRID_OUTPUT 0x26
+
 // Initialises the console UART and prints the boot banner.
 void monitor_init(void);
 
@@ -25,6 +31,9 @@ void monitor_task(uint32_t events);
 
 // The session string, formatted on each call. Main loop only.
 const char *monitor_session_string(void);
+
+// The output state string, formatted on each call. Main loop only.
+const char *monitor_output_string(void);
 
 // The jumper configuration for the configuration string: the I2S format
 // and the filter jumpers' raw code (reserved codes included).

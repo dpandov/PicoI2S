@@ -424,6 +424,18 @@ the wrong pattern wrap; the locate key skips silent and clipped frames.
   fresh UAC1 output).
 - Configuration string (0x24): board, bcdDevice, build, USB mode, format,
   filter, jumper bits, fixed at boot.
+- Version string (0x25, `app/version.c`): the version from
+  `CMakeLists.txt` (also the bcdDevice, so one number names both the
+  release and the descriptor revision Windows caches), the build number
+  (commit count), commit, uncommitted-changes flag, build time (UTC), SDK
+  and TinyUSB versions. `cmake/version.cmake` rewrites the generated
+  header at every build, only when it changes, and only `version.c`
+  includes it, so a rebuild recompiles that one file. The same version
+  and build time go into the binary info for `picotool info` (the SDK's
+  own build date, of its file, is turned off).
+- Output state string (0x26): clk_sys and the clock table's error, the I2S
+  oversampling, the S/PDIF word length and emphasis flag, the receiver
+  FIFO level, underruns / overruns since boot and bad USB packets.
 - `tools/monitor.py` turns them into events; formats in `tools/README.md`.
 
 ## USB OUT re-arm
@@ -476,7 +488,7 @@ MCLK meter.
   3-s stop re-checked. In UAC2: both builds' sweeps (S/PDIF off after
   3.3 s), scenarios A to D and 14 input cycles, no bad window (the fades
   counted as skipped).
-- Scope (2026-10-10, de59100): dual18 at 44.1 and 48 kHz (8x), the
+- Scope (2026-10-10, d791007): dual18 at 44.1 and 48 kHz (8x), the
   input's trimmed clock, MCLK in I2S, the DEM clock in TDA1541A, the
   S/PDIF output and the 3-s stop all as calculated. At 44.1 kHz: BCLK
   6.3507 MHz, 50 % duty, data changes with the falling edge (75 ns setup
@@ -521,12 +533,12 @@ MCLK meter.
   | Linux bring-up | UAC1 | 44.1/16 | 9 min | Raspberry Pi 5, trim +192 ppm |
   | S/PDIF input | UAC2 / UAC1 | input cycling | 15 + 20 min | test transmitter |
   | trim pacer | UAC1 | input cycling | 8 min | test transmitter |
-  | ccc06f8 | UAC2 | 96/24 | 5 min | Linux, dual18 minimum phase |
-  | ccc06f8 | UAC1 | 44.1/16 | 5 min | Linux, trim +192..+197 ppm |
-  | ccc06f8 | UAC2 | 44.1/16, 48/24, 96/24 | 5 min each | optical loop |
-  | ccc06f8 | UAC1 | 44.1/16 | 2 h | optical loop, trim +233..+236 ppm, locked in all 1440 reads |
-  | ccc06f8 | UAC2 | 44.1/16 | 2 h | optical loop |
-  | ccc06f8 | UAC2 | 96/24 | 2 h | optical loop |
+  | c1af96d | UAC2 | 96/24 | 5 min | Linux, dual18 minimum phase |
+  | c1af96d | UAC1 | 44.1/16 | 5 min | Linux, trim +192..+197 ppm |
+  | c1af96d | UAC2 | 44.1/16, 48/24, 96/24 | 5 min each | optical loop |
+  | c1af96d | UAC1 | 44.1/16 | 2 h | optical loop, trim +233..+236 ppm, locked in all 1440 reads |
+  | c1af96d | UAC2 | 44.1/16 | 2 h | optical loop |
+  | c1af96d | UAC2 | 96/24 | 2 h | optical loop |
   | keep-clocks change | UAC2 | 44.1/16, 48/24 | 2 h 45 min each | default build, dual18 minimum phase |
 
   The optical-loop soaks (2026-10-10, overnight) ran with the input

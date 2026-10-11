@@ -20,6 +20,7 @@
 #include "usb/usb_audio.h"
 #include "usb/usb_descriptors.h"
 #include "app/monitor.h"
+#include "app/version.h"
 #include "diag/diag.h"
 #if PICOI2S_SELFTEST
 #include "selftest/selftest.h"
@@ -499,6 +500,12 @@ uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid)
     }
     if (index == STRID_CONFIG) {
         return hidden_string_desc(monitor_config_string());
+    }
+    if (index == STRID_VERSION) {
+        return hidden_string_desc(version_string());
+    }
+    if (index == STRID_OUTPUT) {
+        return hidden_string_desc(monitor_output_string());
     }
 #if PICOI2S_SELFTEST
     if (index == STRID_SELFTEST) {

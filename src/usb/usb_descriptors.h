@@ -15,9 +15,13 @@
 #define USB_PID                 0x0001
 #define USB_PID_UAC1            0x0002
 
-// Bump on every descriptor change: Windows caches descriptors per
+// The firmware version (CMakeLists.txt) in BCD, 1.04 = 0x0104. Bump the
+// version on every descriptor change: Windows caches descriptors per
 // VID/PID/bcdDevice.
-#define USB_BCD_DEVICE          0x0104
+#define USB_BCD_DEVICE          (((PICOI2S_VERSION_MAJOR / 10) << 12) | \
+                                 ((PICOI2S_VERSION_MAJOR % 10) << 8) |  \
+                                 ((PICOI2S_VERSION_MINOR / 10) << 4) |  \
+                                 (PICOI2S_VERSION_MINOR % 10))
 
 #define USB_MANUFACTURER_STR    "PicoI2S"
 #define USB_PRODUCT_STR         "Pico USB to I2S"

@@ -210,8 +210,8 @@ and the rate trim and servo lock are reported per format.
 ## monitor.py
 
 Watches a running device (normal or self-test firmware) and prints one
-timestamped line per event. It polls the diagnostic string and the session
-string (0x23) a few times per second.
+timestamped line per event. It polls the diagnostic string, the session
+string (0x23) and the output state string (0x26) a few times per second.
 
 ```
 python tools/monitor.py                         events only, until Ctrl+C
@@ -220,14 +220,16 @@ python tools/monitor.py --silence 2 --interval 0.5
 ```
 
 ```
-16:54:45 device connected: UAC2, non-Apple host, boot 3
-16:54:45   config: board Waveshare RP2350-One, firmware 1.03, normal build
+16:54:45 device connected: UAC2, non-Apple host, boot 3, up 12.6 s
+16:54:45   config: firmware 1.04 build 21 (3f2a9c1), built 2026-10-11 11:15, Pico SDK 2.3.1, TinyUSB 0.21.0
+16:54:45   config: board Waveshare RP2350-One, normal build
 16:54:45   config: USB UAC2 (mode jumper GP5 open)
 16:54:45   config: output format TDA1541A simultaneous mode 16-bit, DEM clock on (jumpers GP8 GP7 GP6 = 011)
 16:54:45   config: filter sharp, linear phase, 8x at 32 / 44.1 / 48 kHz, 4x at 88.2 / 96 kHz (jumpers GP2 GP3 GP4 = 001)
 16:54:52 stream opened: 48000 Hz / 24-bit (2.304 Mbit/s), volume 0 dB
 16:54:52 playing
 16:54:52 S/PDIF output on: 48000 Hz
+16:54:52 output: clk_sys 153.6 MHz (clock table +0 ppm), I2S 8x, S/PDIF 24-bit
 16:54:52 digital silence since the stream opened
 16:54:58 signal after 5.8 s of silence
 16:55:04 digital silence
@@ -236,15 +238,21 @@ python tools/monitor.py --silence 2 --interval 0.5
 ```
 
 Events:
-- device connected, disconnected or rebooted (with the crash record of the
-  previous boot), each followed by the configuration: board, firmware
-  version, build (normal, self-test, test tone), USB mode, output format,
-  filter (and whether the format uses it), and the state of every jumper
-  (firmware without the configuration string: "not reported");
+- device connected, disconnected or rebooted (with the uptime and the
+  crash record of the previous boot), each followed by the firmware
+  version, build number, commit (and whether it had uncommitted changes),
+  build time and the SDK and TinyUSB versions, then the configuration:
+  board, build type (normal, self-test, test tone), USB mode, output
+  format, filter (and whether the format uses it), and the state of every
+  jumper (firmware without these strings: "not reported");
 - stream opened, restarted or closed, with the format, the PCM data rate
   and the volume;
 - playing, stalled, underrun;
 - S/PDIF output on and off;
+- the output's clock on every change: clk_sys, the clock table's error at
+  zero trim, the I2S oversampling and the S/PDIF word length;
+- de-emphasis on and off (the S/PDIF flag set and the I2S path
+  de-emphasising), and USB packets without whole frames;
 - digital silence (all-zero samples, after the volume, for `--silence`
   seconds) and the return of signal;
 - volume changes and clock lock (UAC1);
@@ -264,7 +272,9 @@ Events:
 17:02:11 coax input locked and selected: 44100 Hz, +12 ppm
 17:02:14 S/PDIF output on: 44100 Hz
 17:02:14 playing: coax input, 44100 Hz, +12 ppm, 16-bit
+17:02:14 output: clk_sys 152.4 MHz (clock table -63 ppm), I2S 8x, S/PDIF 16-bit
 17:02:40 input pre-emphasis on (50/15 us)
+17:02:40 de-emphasis on: S/PDIF flagged, I2S / dual-line de-emphasised
 17:03:05 stream opened: 48000 Hz / 16-bit (1.536 Mbit/s), volume 0 dB
 17:03:07 playing
 17:03:07 S/PDIF output switched to 48000 Hz
@@ -275,7 +285,7 @@ Events:
 |---|---|
 | `--interval S` | poll period (default 0.25 s); events shorter than this are not seen |
 | `--silence S` | all-zero samples for this long count as digital silence (default 0.5 s) |
-| `--status S` | status line every S seconds while a stream is open: format, data rate, the sample rate measured from the device's frame counter against the PC clock (over 30 s, to about 100 ppm; the USB read timing limits it), FIFO level, ring minimum, main-loop time, trim, current silence. While the S/PDIF input plays: the input, its rate and offset, word length, emphasis, current silence |
+| `--status S` | status line every S seconds while a stream is open: format, data rate, the sample rate measured from the device's frame counter against the PC clock (over 30 s, to about 100 ppm; the USB read timing limits it), FIFO level and its maximum, ring minimum, main-loop time, trim, current silence. While the S/PDIF input plays: the input, its rate and offset, word length, emphasis, the receiver FIFO level, current silence. Both add the underruns and overruns since boot when there were any |
 | `--log FILE` | append every line to a file |
 
 Ctrl+C prints a summary (stream starts, time streaming).
@@ -283,8 +293,10 @@ Ctrl+C prints a summary (stream starts, time streaming).
 ## diag.py
 
 Reads the diagnostic string (0x20): the previous boot's crash record and
-the live stream status, after one line with the configuration string
-(0x24, see below). This works without a debug probe or UART.
+the live stream status, after a line each with the version string (0x25)
+and the configuration string (0x24, see below), and followed by the
+session (0x23) and output state (0x26) strings. This works without a
+debug probe or UART.
 
 ```
 python tools/diag.py            one reading
@@ -366,6 +378,49 @@ e.g. board=rp2350-one fw=0104 build=normal mode=uac2 format=i2s filter=nos jumpe
 
 `filter` is what the filter jumpers select (reserved codes: sharp), also
 for I2S / LJ / RJ, which never use it; in `jumpers` 1 is grounded.
+
+The version string (0x25, printed by `diag.py` first and by `monitor.py`
+on connect) identifies the build:
+
+```
+ver=<major.minor> build=<N> git=<commit> dirty=<0|1> date=<UTC> sdk=<version> tinyusb=<version>
+
+e.g. ver=1.04 build=21 git=3f2a9c1 dirty=0 date=2026-10-11T08:13Z sdk=2.3.1 tinyusb=0.21.0
+```
+
+| Field | Meaning |
+|---|---|
+| `ver` | firmware version from `CMakeLists.txt` (`project(... VERSION 1.4)`, shown as 1.04; also `fw`, the USB bcdDevice) |
+| `build` | build number: commits in the checked-out branch (`git rev-list --count HEAD`), 0 without git |
+| `git` | the commit built, `unknown` without git |
+| `dirty` | 1 when the tracked files differed from that commit |
+| `date` | build time, UTC (`monitor.py` shows local time) |
+| `sdk`, `tinyusb` | Pico SDK and TinyUSB versions |
+
+`picotool info PicoI2S.uf2` (or `picotool info -a` on the device) shows
+the same version, build number and commit, and the build time.
+
+The output state string (0x26, read by `monitor.py` and printed by
+`diag.py` after each reading), at most 81 characters:
+
+```
+clk<Hz> pll<+|-><ppm>|pll- i2s<osr>|i2s- w<bits>|w- e<0|1> rxl<frames>|rxl- urt<N> ovt<N> bad<N>
+
+e.g. clk147428571 pll-186 i2s8 w24 e0 rxl- urt0 ovt0 bad0
+```
+
+| Token | Meaning |
+|---|---|
+| `clk<Hz>` | clk_sys, set per sample rate (README, clock table) |
+| `pll` | rate error of the running output at zero trim against its nominal rate, in ppm; `pll-` when stopped |
+| `i2s` | I2S / dual-line output frames per sample: 8 or 4 with an oversampling filter, 1 otherwise; `i2s-` when not running |
+| `w` | S/PDIF word length sent (16 or 24); `w-` when stopped |
+| `e` | 1 while pre-emphasised input samples go out (S/PDIF flag set, I2S path de-emphasising) |
+| `rxl` | S/PDIF receiver FIFO level in frames while an input is selected; `rxl-` otherwise |
+| `urt`, `ovt` | underruns and overruns since boot |
+| `bad` | USB packets with no data or not whole stereo frames, since boot |
+
+Totals stop at 999999.
 
 ## i2s_filter_plot.py
 
