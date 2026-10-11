@@ -4,13 +4,16 @@
 // All tud_* callbacks in the firmware live here. Control and state callbacks
 // run from tud_task() in the main loop, so they never run concurrently with
 // the API. The receive and feedback paths run in the USB interrupt:
-// tud_audio_rx_done_isr() and __wrap_usbd_edpt_xfer().
+// tud_audio_rx_done_isr() and __wrap_usbd_edpt_xfer(). The main loop re-arms
+// a halted receive endpoint (check_rx_halt()).
 
 #include "usb/usb_audio.h"
 
 #include <string.h>
 
+#include "hardware/structs/usb_dpram.h"
 #include "hardware/sync.h"
+#include "hardware/timer.h"
 #include "tusb.h"
 #include "device/usbd_pvt.h"
 #include "usb/usb_descriptors.h"
@@ -62,7 +65,9 @@ static struct {
     uint8_t  att_db;          // volume on the 1 dB grid, clamped to the range
     volatile uint32_t events; // pending USB_AUDIO_EVT_* bits
     volatile bool rx_misaligned; // set in the USB interrupt
-    bool     rx_halted;       // halt of the current stream already counted
+    bool     rx_halted;       // current halt counted, not yet re-armed
+    uint8_t  rx_rearm_fails;  // consecutive failed re-arms in this stream
+    uint32_t rx_rearm_us;     // time of the last re-arm attempt
     usb_audio_stats_t stats;  // overruns, bad_packets and fifo_max are also
                               // written in the USB interrupt
 } s;
@@ -94,20 +99,57 @@ static void reconcile_mount(void)
     }
 }
 
+bool __real_usbd_edpt_xfer(uint8_t rhport, uint8_t ep_addr, uint8_t *buffer,
+                           uint16_t total_bytes, bool is_isr);
+
+// The driver's receive arm (its linear buffer and the alt setting's
+// endpoint size), recorded by __wrap_usbd_edpt_xfer().
+static uint8_t *rx_arm_buf;
+static uint16_t rx_arm_len;
+
+#define RX_REARM_MIN_US     1000u
+#define RX_REARM_MAX_FAILS  3u
+
 // After a zero-length packet the driver returns before re-arming the OUT
-// endpoint and without calling tud_audio_rx_done_isr(), so reception stops
-// until the next SET_INTERFACE. The endpoint is then left idle: count that
-// once per stream as a bad packet. Race-free in the main loop, because the
-// interrupt clears and re-sets the busy flag within one packet.
+// endpoint and without calling tud_audio_rx_done_isr(), so reception would
+// stop until the next SET_INTERFACE. An open stream with an idle endpoint is
+// re-armed here with the driver's own arguments; the next packet completes
+// through the driver as usual. One bad packet per halt; at most one attempt
+// per millisecond, none after RX_REARM_MAX_FAILS failures in a row until the
+// next stream.
+// Interrupts stay off from the check to the arm: the USB interrupt clears
+// and re-sets the busy flag within one handler, and a bus reset disables
+// the endpoint in the interrupt before tud_task() unmounts. SET_INTERFACE
+// runs in tud_task(), on this thread, and sets stream_alt to zero in the
+// same call that closes the endpoint.
 static void check_rx_halt(void)
 {
-    if (s.stream_alt != AS_ALT_ZERO_BW && !s.rx_halted &&
-        !usbd_edpt_busy(0, EPNUM_AUDIO_OUT)) {
-        s.rx_halted = true;
-        uint32_t irq = save_and_disable_interrupts();
-        s.stats.bad_packets++;
-        restore_interrupts(irq);
+    if (s.stream_alt == AS_ALT_ZERO_BW || s.rx_rearm_fails >= RX_REARM_MAX_FAILS ||
+        usbd_edpt_busy(0, EPNUM_AUDIO_OUT)) {
+        return;
     }
+    uint32_t const now = time_us_32();
+    if (now - s.rx_rearm_us < RX_REARM_MIN_US) {
+        return;
+    }
+    uint32_t irq = save_and_disable_interrupts();
+    if (s.stream_alt != AS_ALT_ZERO_BW && tud_mounted() &&
+        !usbd_edpt_busy(0, EPNUM_AUDIO_OUT) &&
+        (usb_dpram->ep_ctrl[EPNUM_AUDIO_OUT - 1].out & EP_CTRL_ENABLE_BITS)) {
+        if (!s.rx_halted) {
+            s.rx_halted = true;
+            s.stats.bad_packets++;
+        }
+        s.rx_rearm_us = now;
+        if (rx_arm_buf != NULL &&
+            __real_usbd_edpt_xfer(0, EPNUM_AUDIO_OUT, rx_arm_buf, rx_arm_len, false)) {
+            s.rx_halted = false;
+            s.rx_rearm_fails = 0;
+        } else {
+            s.rx_rearm_fails++;
+        }
+    }
+    restore_interrupts(irq);
 }
 
 static bool rate_supported(uint32_t rate)
@@ -593,8 +635,10 @@ bool tud_audio_set_itf_cb(uint8_t rhport, tusb_control_request_t const *p_reques
         return false;
     }
 
-    s.stream_alt = alt;
-    s.rx_halted  = false;
+    s.stream_alt     = alt;
+    s.rx_halted      = false;
+    s.rx_rearm_fails = 0;
+    s.rx_rearm_us    = time_us_32() - RX_REARM_MIN_US;
     raise_event(USB_AUDIO_EVT_STREAM_START);
     diag_mark(DIAG_MARK_SET_ITF_DONE);
     return true;
@@ -656,23 +700,27 @@ void tud_audio_feedback_params_cb(uint8_t func_id, uint8_t alt_itf, audio_feedba
 }
 
 //--------------------------------------------------------------------+
-// Apple feedback format
+// Endpoint transfer hook: Apple feedback format, receive arm
 //--------------------------------------------------------------------+
 
-// TinyUSB sends UAC2 feedback as 16.16 in 4 bytes, which Windows requires.
-// Apple hosts require 10.14 in 3 bytes on Full Speed (see AUDIO_FB_EP_SIZE),
-// so the feedback transfer is rewritten in place. TinyUSB's own calls to
-// usbd_edpt_xfer() reach this through the linker (--wrap, CMakeLists.txt).
-// Inert in UAC1 mode: EP 0x81 does not exist and usb_host_is_apple() is
-// false. Called from the USB interrupt and from tud_task().
-bool __real_usbd_edpt_xfer(uint8_t rhport, uint8_t ep_addr, uint8_t *buffer,
-                           uint16_t total_bytes, bool is_isr);
+// TinyUSB's own calls to usbd_edpt_xfer() reach this through the linker
+// (--wrap, CMakeLists.txt). Called from the USB interrupt and from
+// tud_task().
+// Receive: the arguments are recorded for check_rx_halt().
+// Feedback: TinyUSB sends UAC2 feedback as 16.16 in 4 bytes, which Windows
+// requires. Apple hosts require 10.14 in 3 bytes on Full Speed (see
+// AUDIO_FB_EP_SIZE), so the transfer is rewritten in place. Inert in UAC1
+// mode: EP 0x81 does not exist and usb_host_is_apple() is false.
 bool __wrap_usbd_edpt_xfer(uint8_t rhport, uint8_t ep_addr, uint8_t *buffer,
                            uint16_t total_bytes, bool is_isr);
 
 bool __wrap_usbd_edpt_xfer(uint8_t rhport, uint8_t ep_addr, uint8_t *buffer,
                            uint16_t total_bytes, bool is_isr)
 {
+    if (ep_addr == EPNUM_AUDIO_OUT) {
+        rx_arm_buf = buffer;
+        rx_arm_len = total_bytes;
+    }
     if (ep_addr == EPNUM_AUDIO_FB && total_bytes == 4 && usb_host_is_apple()) {
         uint32_t const fb = tu_le32toh(tu_unaligned_read32(buffer)) >> 2;
         buffer[0] = (uint8_t) fb;

@@ -11,6 +11,8 @@
 //     transition), then step 64 cells per subframe. Every slot 4..31 must
 //     start with a transition; bit = transition in the middle of the slot.
 //     A bad preamble drops sync and the search restarts.
+// Passes 1, 3 and 4 are resumable: a step processes a bounded number of
+// words or subframes and keeps its position in the decoder state.
 
 #include "selftest/selftest_decode.h"
 
@@ -21,18 +23,18 @@
 
 #if PICO_ON_DEVICE
 #include "pico.h"
-// Runs continuously on core 1: out of XIP so it does not compete with
-// core 0 for the flash cache.
+// Runs on core 1 beside the oversampling filter: out of XIP so it does
+// not compete with core 0 for the flash cache.
 #define DECODE_FUNC(name) __not_in_flash_func(name)
 #else
 #define DECODE_FUNC(name) name
 #endif
 
-// A window of 3 blocks at up to ~11 samples per cell fits; bounds the cell
-// buffer to 16 KB.
-#define MAX_CELLS   131072u
+#define MAX_CELLS   SELFTEST_DECODE_MAX_CELLS
 #define HIST_BINS   256u
 #define BLOCK       192u
+
+enum { PH_HIST, PH_CELLS, PH_SUBFRAMES, PH_DONE };
 
 static uint32_t cellbits[MAX_CELLS / 32u];
 static uint32_t hist[HIST_BINS];
@@ -41,16 +43,24 @@ static uint32_t hist[HIST_BINS];
 // Runs and cells
 //--------------------------------------------------------------------+
 
-typedef void (*run_fn)(void *ctx, uint32_t level, uint32_t len);
+typedef void (*run_fn)(selftest_decoder_t *d, uint32_t level, uint32_t len);
 
-// Calls fn for every complete run; returns the number of runs.
-static uint32_t DECODE_FUNC(for_each_run)(const uint32_t *cap, uint32_t n_words, run_fn fn,
-                                          void *ctx) {
-    uint32_t level = cap[0] >> 31;
-    uint32_t run = 0, count = 0;
-    bool first = true;
-    for (uint32_t i = 0; i < n_words; i++) {
-        uint32_t w = cap[i];
+static void run_iter_reset(selftest_decoder_t *d) {
+    d->word = 0;
+    d->level = d->cap[0] >> 31;
+    d->run = 0;
+    d->count = 0;
+    d->first = true;
+}
+
+// Calls fn for every complete run in the next `words` words; true when the
+// capture is exhausted.
+static bool DECODE_FUNC(run_iter)(selftest_decoder_t *d, uint32_t words, run_fn fn) {
+    uint32_t level = d->level, run = d->run;
+    bool first = d->first;
+    uint32_t end = d->word + words < d->n_words ? d->word + words : d->n_words;
+    for (uint32_t i = d->word; i < end; i++) {
+        uint32_t w = d->cap[i];
         uint32_t rem = 32;
         while (rem) {
             // Bits differing from the current level among the rem
@@ -66,8 +76,8 @@ static uint32_t DECODE_FUNC(for_each_run)(const uint32_t *cap, uint32_t n_words,
             uint32_t z = (uint32_t)__builtin_clz(x);
             run += z;
             if (!first) {
-                fn(ctx, level, run);
-                count++;
+                fn(d, level, run);
+                d->count++;
             }
             first = false;
             level ^= 1u;
@@ -76,11 +86,15 @@ static uint32_t DECODE_FUNC(for_each_run)(const uint32_t *cap, uint32_t n_words,
             rem -= z;
         }
     }
-    return count;
+    d->word = end;
+    d->level = level;
+    d->run = run;
+    d->first = first;
+    return end >= d->n_words;
 }
 
-static void DECODE_FUNC(hist_add)(void *ctx, uint32_t level, uint32_t len) {
-    (void)ctx;
+static void DECODE_FUNC(hist_add)(selftest_decoder_t *d, uint32_t level, uint32_t len) {
+    (void)d;
     (void)level;
     hist[len < HIST_BINS ? len : HIST_BINS - 1u]++;
 }
@@ -121,29 +135,21 @@ static uint32_t DECODE_FUNC(estimate_period)(uint32_t total) {
     return ovs;
 }
 
-typedef struct {
-    uint32_t ovs_q8;
-    uint32_t ncells;
-    uint32_t err_cell;
-    uint64_t span_samples;
-    uint32_t span_cells;
-} cell_ctx_t;
-
-static void DECODE_FUNC(add_cells)(void *vctx, uint32_t level, uint32_t len) {
-    cell_ctx_t *c = vctx;
+static void DECODE_FUNC(add_cells)(selftest_decoder_t *d, uint32_t level, uint32_t len) {
     // 32-bit division: a run is shorter than the capture (< 2^20 samples).
-    uint32_t n = (len * 256u + c->ovs_q8 / 2u) / c->ovs_q8;
+    uint32_t ovs = d->r->ovs_q8;
+    uint32_t n = (len * 256u + ovs / 2u) / ovs;
     if (n == 0 || n > 3u) {
-        c->err_cell++;
+        d->cell_err++;
     }
     if (n > 8u) {
         n = 8u;
     }
-    c->span_samples += len;
-    c->span_cells += n;
-    for (uint32_t k = 0; k < n && c->ncells < MAX_CELLS; k++, c->ncells++) {
+    d->span_samples += len;
+    d->span_cells += n;
+    for (uint32_t k = 0; k < n && d->ncells < MAX_CELLS; k++, d->ncells++) {
         if (level) {
-            cellbits[c->ncells >> 5] |= 0x80000000u >> (c->ncells & 31u);
+            cellbits[d->ncells >> 5] |= 0x80000000u >> (d->ncells & 31u);
         }
     }
 }
@@ -176,14 +182,17 @@ static int DECODE_FUNC(preamble_at)(uint32_t i) {
     }
 }
 
-// Next preamble at or after from that follows a transition; ncells if none.
-static uint32_t DECODE_FUNC(find_preamble)(uint32_t from, uint32_t ncells) {
-    for (uint32_t i = from < 1u ? 1u : from; i + 64u <= ncells; i++) {
+// Next preamble at or after from that follows a transition, searching at
+// most `limit` cells; the position reached if none.
+static uint32_t DECODE_FUNC(find_preamble)(uint32_t from, uint32_t limit, uint32_t ncells) {
+    uint32_t i = from < 1u ? 1u : from;
+    uint32_t end = i + limit;
+    for (; i < end && i + 64u <= ncells; i++) {
         if (cell(i - 1u) != cell(i) && preamble_at(i) != PRE_NONE) {
             return i;
         }
     }
-    return ncells;
+    return i;
 }
 
 static inline bool pattern_pair_ok(unsigned bits, uint32_t l, uint32_t r) {
@@ -198,176 +207,246 @@ static inline bool pattern_step_ok(unsigned bits, uint32_t prev_l, uint32_t l) {
     return ((l - prev_l) & SELFTEST_MASK24) == step;
 }
 
-typedef struct {
-    bool     in_sync;
-    bool     last_was_a;
-    bool     have_b;        // a B was seen since sync: fc is valid
-    uint32_t fc;            // frame index in the block
-    bool     have_a;        // subframe A of the current frame decoded
-    uint32_t a_sample, a_cbit;
-    bool     have_prev;     // prev_l holds the last non-silent L
-    uint32_t prev_l;
-    bool     seen_audio;    // a non-silent frame was seen since sync
-    bool     in_gap;        // silence after a non-silent frame
-    uint8_t  cs[SELFTEST_CS_BYTES];
-} frame_state_t;
-
-static void DECODE_FUNC(frame_done)(frame_state_t *s, uint32_t l, uint32_t r_sample,
-                                    unsigned pattern_bits, selftest_decode_t *r) {
+static void DECODE_FUNC(frame_done)(selftest_decoder_t *d, uint32_t l, uint32_t r_sample) {
+    selftest_decode_t *r = d->r;
+    if (d->frames_out && d->frames_stored < d->frames_max) {
+        d->frames_out[2u * d->frames_stored] = (int32_t)(l << 8);
+        d->frames_out[2u * d->frames_stored + 1u] = (int32_t)(r_sample << 8);
+        d->frames_stored++;
+    }
     if (l == 0 && r_sample == 0) {
         r->silent++;
-        s->have_prev = false;
-        s->in_gap = s->seen_audio;
+        d->s.have_prev = false;
+        d->s.in_gap = d->s.seen_audio;
         return;
     }
-    if (pattern_bits) {
-        if (s->in_gap) {
+    if (d->pattern_bits) {
+        if (d->s.in_gap) {
             r->gaps++;
         }
-        bool ok = pattern_pair_ok(pattern_bits, l, r_sample) &&
-                  (!s->have_prev || pattern_step_ok(pattern_bits, s->prev_l, l));
+        bool ok = pattern_pair_ok(d->pattern_bits, l, r_sample) &&
+                  (!d->s.have_prev || pattern_step_ok(d->pattern_bits, d->s.prev_l, l));
         if (!ok) {
             if (r->err_sample == 0) {
                 r->viol_frame = r->frames;
-                r->viol_prev = s->have_prev ? s->prev_l : 0u;
+                r->viol_prev = d->s.have_prev ? d->s.prev_l : 0u;
                 r->viol_l = l;
                 r->viol_r = r_sample;
             }
             r->err_sample++;
         }
     }
-    s->seen_audio = true;
-    s->in_gap = false;
-    s->prev_l = l;
-    s->have_prev = true;
+    d->s.seen_audio = true;
+    d->s.in_gap = false;
+    d->s.prev_l = l;
+    d->s.have_prev = true;
 }
 
-static void DECODE_FUNC(decode_subframes)(uint32_t ncells,
-                                          const uint8_t expect_cs[SELFTEST_CS_BYTES],
-                                          unsigned pattern_bits, selftest_decode_t *r) {
-    frame_state_t s;
-    memset(&s, 0, sizeof(s));
-
-    uint32_t pos = find_preamble(0, ncells);
-    if (pos >= ncells) {
-        r->status = SELFTEST_DEC_NOSYNC;
+// One subframe at d->pos (a preamble position). Resynchronises on a bad
+// preamble.
+static void DECODE_FUNC(decode_subframe)(selftest_decoder_t *d) {
+    selftest_decode_t *r = d->r;
+    uint32_t pos = d->pos;
+    int t = preamble_at(pos);
+    if (t == PRE_NONE) {
+        r->err_cell++;
+        memset(&d->s, 0, sizeof(d->s));
+        d->pos = pos + 1u;
+        d->searching = true;
         return;
     }
-    while (pos + 64u <= ncells) {
-        int t = preamble_at(pos);
-        if (t == PRE_NONE) {
-            r->err_cell++;
-            memset(&s, 0, sizeof(s));
-            pos = find_preamble(pos + 1u, ncells);
+
+    bool bad = pos > 0 && cell(pos - 1u) == cell(pos);
+    uint32_t data = 0;          // slot k in bit k (4..31)
+    for (uint32_t k = 4; k < 32u; k++) {
+        uint32_t p = pos + 2u * k;
+        uint32_t c0 = cell(p), c1 = cell(p + 1u);
+        if (c0 == cell(p - 1u)) {
+            bad = true;         // no transition at the slot boundary
+        }
+        data |= (c0 ^ c1) << k;
+    }
+    if (bad) {
+        r->err_cell++;
+    }
+    if ((uint32_t)__builtin_popcount(data) & 1u) {
+        r->err_parity++;
+    }
+    if ((data >> 28) & 3u) {
+        r->err_vu++;
+    }
+    uint32_t sample = (data >> 4) & SELFTEST_MASK24;
+    uint32_t cbit = (data >> 30) & 1u;
+    bool is_a = t != PRE_W;
+
+    if (d->s.in_sync && is_a == d->s.last_was_a) {
+        r->err_order++;
+    }
+    if (is_a) {
+        if (t == PRE_B) {
+            if (d->s.have_b) {
+                if (d->s.fc + 1u != BLOCK) {
+                    r->err_order++;
+                } else {
+                    bool eq = memcmp(d->s.cs, d->expect_cs, SELFTEST_CS_BYTES) == 0;
+                    r->cs_match = (eq && r->cs_match != 0) ? 1 : 0;
+                    memcpy(r->cs, d->s.cs, SELFTEST_CS_BYTES);
+                }
+            }
+            r->blocks++;
+            d->s.have_b = true;
+            d->s.fc = 0;
+            memset(d->s.cs, 0, sizeof(d->s.cs));
+        } else if (d->s.have_b && ++d->s.fc >= BLOCK) {
+            r->err_order++;     // B missing
+            d->s.have_b = false;
+        }
+        if (d->s.have_b && cbit) {
+            d->s.cs[d->s.fc >> 3] |= (uint8_t)(1u << (d->s.fc & 7u));
+        }
+        d->s.a_sample = sample;
+        d->s.a_cbit = cbit;
+        d->s.have_a = true;
+    } else {
+        if (d->s.have_a) {
+            frame_done(d, d->s.a_sample, sample);
+            if (cbit != d->s.a_cbit) {
+                r->err_cs_ab++;
+            }
+            r->frames++;
+        }
+        d->s.have_a = false;
+    }
+    d->s.last_was_a = is_a;
+    d->s.in_sync = true;
+    d->pos = pos + 64u;
+}
+
+// Up to `subframes` subframes; a preamble search costs 64 cells per
+// subframe of budget. True when the cells are exhausted.
+static bool DECODE_FUNC(subframe_pass)(selftest_decoder_t *d, uint32_t subframes) {
+    uint32_t ncells = d->ncells;
+    while (subframes) {
+        if (d->pos + 64u > ncells) {
+            return true;
+        }
+        if (d->searching) {
+            uint32_t found = find_preamble(d->pos, 64u * subframes, ncells);
+            if (found + 64u > ncells) {
+                d->pos = found;
+                return true;
+            }
+            if (preamble_at(found) == PRE_NONE || cell(found - 1u) == cell(found)) {
+                d->pos = found;     // budget exhausted inside the search
+                return false;
+            }
+            d->pos = found;
+            d->searching = false;
+            d->synced_once = true;
             continue;
         }
-
-        bool bad = pos > 0 && cell(pos - 1u) == cell(pos);
-        uint32_t data = 0;          // slot k in bit k (4..31)
-        for (uint32_t k = 4; k < 32u; k++) {
-            uint32_t p = pos + 2u * k;
-            uint32_t c0 = cell(p), c1 = cell(p + 1u);
-            if (c0 == cell(p - 1u)) {
-                bad = true;         // no transition at the slot boundary
-            }
-            data |= (c0 ^ c1) << k;
-        }
-        if (bad) {
-            r->err_cell++;
-        }
-        if ((uint32_t)__builtin_popcount(data) & 1u) {
-            r->err_parity++;
-        }
-        if ((data >> 28) & 3u) {
-            r->err_vu++;
-        }
-        uint32_t sample = (data >> 4) & SELFTEST_MASK24;
-        uint32_t cbit = (data >> 30) & 1u;
-        bool is_a = t != PRE_W;
-
-        if (s.in_sync && is_a == s.last_was_a) {
-            r->err_order++;
-        }
-        if (is_a) {
-            if (t == PRE_B) {
-                if (s.have_b) {
-                    if (s.fc + 1u != BLOCK) {
-                        r->err_order++;
-                    } else {
-                        bool eq = memcmp(s.cs, expect_cs, SELFTEST_CS_BYTES) == 0;
-                        r->cs_match = (eq && r->cs_match != 0) ? 1 : 0;
-                        memcpy(r->cs, s.cs, SELFTEST_CS_BYTES);
-                    }
-                }
-                r->blocks++;
-                s.have_b = true;
-                s.fc = 0;
-                memset(s.cs, 0, sizeof(s.cs));
-            } else if (s.have_b && ++s.fc >= BLOCK) {
-                r->err_order++;     // B missing
-                s.have_b = false;
-            }
-            if (s.have_b && cbit) {
-                s.cs[s.fc >> 3] |= (uint8_t)(1u << (s.fc & 7u));
-            }
-            s.a_sample = sample;
-            s.a_cbit = cbit;
-            s.have_a = true;
-        } else {
-            if (s.have_a) {
-                frame_done(&s, s.a_sample, sample, pattern_bits, r);
-                if (cbit != s.a_cbit) {
-                    r->err_cs_ab++;
-                }
-                r->frames++;
-            }
-            s.have_a = false;
-        }
-        s.last_was_a = is_a;
-        s.in_sync = true;
-        pos += 64u;
+        decode_subframe(d);
+        subframes--;
     }
+    return false;
 }
 
 //--------------------------------------------------------------------+
 // Entry points
 //--------------------------------------------------------------------+
 
-void DECODE_FUNC(selftest_decode)(const uint32_t *cap, uint32_t n_words,
-                                  const uint8_t expect_cs[SELFTEST_CS_BYTES],
-                                  unsigned pattern_bits, selftest_decode_t *r) {
+void selftest_decode_begin(selftest_decoder_t *d, const uint32_t *cap, uint32_t n_words,
+                           const uint8_t expect_cs[SELFTEST_CS_BYTES], unsigned pattern_bits,
+                           int32_t *frames_out, uint32_t frames_max, selftest_decode_t *r) {
+    memset(d, 0, sizeof(*d));
     memset(r, 0, sizeof(*r));
+    d->cap = cap;
+    d->n_words = n_words;
+    d->expect_cs = expect_cs;
+    d->pattern_bits = pattern_bits;
+    d->frames_out = frames_out;
+    d->frames_max = frames_out ? frames_max : 0u;
+    d->r = r;
     r->cs_match = -1;
     if (n_words == 0) {
         r->status = SELFTEST_DEC_NOSIG;
+        d->phase = PH_DONE;
         return;
     }
-
     memset(hist, 0, sizeof(hist));
-    r->runs = for_each_run(cap, n_words, hist_add, NULL);
-    if (r->runs == 0) {
-        r->status = SELFTEST_DEC_NOSIG;
-        r->level = cap[0] >> 31;
-        return;
-    }
-    r->ovs_q8 = estimate_period(r->runs);
-    if (r->ovs_q8 < 256u) {         // under 1 sample per cell
-        r->status = SELFTEST_DEC_NOSYNC;
-        return;
-    }
+    run_iter_reset(d);
+    d->phase = PH_HIST;
+}
 
-    memset(cellbits, 0, sizeof(cellbits));
-    cell_ctx_t c = {.ovs_q8 = r->ovs_q8};
-    for_each_run(cap, n_words, add_cells, &c);
-    r->err_cell = c.err_cell;
-    r->span_samples = c.span_samples;
-    r->span_cells = c.span_cells;
+bool DECODE_FUNC(selftest_decode_step)(selftest_decoder_t *d, uint32_t words, uint32_t subframes) {
+    selftest_decode_t *r = d->r;
+    switch (d->phase) {
+    case PH_HIST:
+        if (!run_iter(d, words, hist_add)) {
+            return false;
+        }
+        r->runs = d->count;
+        if (r->runs == 0) {
+            r->status = SELFTEST_DEC_NOSIG;
+            r->level = d->cap[0] >> 31;
+            d->phase = PH_DONE;
+            return true;
+        }
+        r->ovs_q8 = estimate_period(r->runs);
+        if (r->ovs_q8 < 256u) {         // under 1 sample per cell
+            r->status = SELFTEST_DEC_NOSYNC;
+            d->phase = PH_DONE;
+            return true;
+        }
+        memset(cellbits, 0, sizeof(cellbits));
+        run_iter_reset(d);
+        d->phase = PH_CELLS;
+        return false;
+    case PH_CELLS:
+        if (!run_iter(d, words, add_cells)) {
+            return false;
+        }
+        r->err_cell = d->cell_err;
+        r->span_samples = d->span_samples;
+        r->span_cells = d->span_cells;
+        r->status = SELFTEST_DEC_OK;
+        d->pos = 0;
+        d->searching = true;
+        d->phase = PH_SUBFRAMES;
+        return false;
+    case PH_SUBFRAMES:
+        if (!subframe_pass(d, subframes)) {
+            return false;
+        }
+        if (!d->synced_once) {
+            r->status = SELFTEST_DEC_NOSYNC;
+        }
+        d->phase = PH_DONE;
+        return true;
+    default:
+        return true;
+    }
+}
 
-    r->status = SELFTEST_DEC_OK;
-    decode_subframes(c.ncells, expect_cs, pattern_bits, r);
+uint32_t selftest_decode_frames_stored(const selftest_decoder_t *d) {
+    return d->frames_stored;
+}
+
+void selftest_decode(const uint32_t *cap, uint32_t n_words,
+                     const uint8_t expect_cs[SELFTEST_CS_BYTES], unsigned pattern_bits,
+                     selftest_decode_t *r) {
+    static selftest_decoder_t d;
+    selftest_decode_begin(&d, cap, n_words, expect_cs, pattern_bits, NULL, 0, r);
+    while (!selftest_decode_step(&d, 0xFFFFFFFFu, 0xFFFFFFFFu / 64u)) {
+    }
 }
 
 uint32_t selftest_decode_errors(const selftest_decode_t *r) {
     return r->err_cell + r->err_parity + r->err_order + r->err_vu + r->err_cs_ab +
            r->err_sample + (r->cs_match != 1 ? 1u : 0u);
+}
+
+bool selftest_decode_frames_clean(const selftest_decode_t *r) {
+    return r->status == SELFTEST_DEC_OK && r->err_cell == 0 && r->err_parity == 0 &&
+           r->err_order == 0 && r->frames != 0;
 }

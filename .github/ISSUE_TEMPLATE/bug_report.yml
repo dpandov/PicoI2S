@@ -1,0 +1,57 @@
+name: Bug report
+description: Something does not play, sounds wrong, or the device misbehaves
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what happened instead. Audible problems - what they sound like and how often.
+    validations:
+      required: true
+  - type: textarea
+    id: diag
+    attributes:
+      label: Output of `python tools/diag.py`
+      description: Firmware version and build, configuration, live state and the previous boot's crash record. Run it while the problem is present, or right after.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: monitor
+    attributes:
+      label: Monitor log (optional)
+      description: For problems over time, `python tools/monitor.py --status 10 --log monitor.log` while it happens.
+      render: text
+  - type: input
+    id: host
+    attributes:
+      label: Host
+      description: Operating system and version, player and its output mode (e.g. Windows 11 24H2, foobar2000 WASAPI exclusive)
+    validations:
+      required: true
+  - type: input
+    id: dac
+    attributes:
+      label: DAC and wiring
+      description: DAC chip or board, format jumpers, and whether S/PDIF output or input is used
+  - type: dropdown
+    id: board
+    attributes:
+      label: Board
+      options:
+        - Waveshare RP2350-One
+        - Raspberry Pi Pico 2
+        - Other RP2350 board
+    validations:
+      required: true
+  - type: dropdown
+    id: build
+    attributes:
+      label: Firmware
+      options:
+        - Release file from GitHub
+        - Built from source without changes
+        - Built from source with changes or extra build options
+    validations:
+      required: true

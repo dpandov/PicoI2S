@@ -6,13 +6,15 @@
 #include <string.h>
 
 #include "pico/stdlib.h"
+#include "pico/bootrom.h"
 #include "hardware/watchdog.h"
 #include "hardware/clocks.h"
 #include "hardware/structs/watchdog.h"
 #include "hardware/structs/systick.h"
 #include "hardware/structs/scb.h"
 
-// Watchdog scratch usage (scratch 4..7 belong to the SDK / bootrom).
+// Watchdog scratch usage (scratch 4..7 belong to the SDK; the boot ROM's
+// reboot call also writes 2 and 3).
 #define SCR_MAGIC   0   // DIAG_MAGIC in the top half, boot count in the bottom
 #define SCR_MARK    1   // last breadcrumb
 #define SCR_INFO    2   // panic fmt pointer, fault PC or hang PC
@@ -173,7 +175,10 @@ static void systick_start(void) {
 
 void diag_init(void) {
     uint32_t magic = *scr(SCR_MAGIC);
-    bool valid = (magic & DIAG_MAGIC_MASK) == DIAG_MAGIC;
+    // After a reboot through the boot ROM (flash update, BOOTSEL) scratch 2
+    // and 3 hold its reboot parameters, not a record.
+    bool valid = (magic & DIAG_MAGIC_MASK) == DIAG_MAGIC &&
+                 rom_get_last_boot_type() == BOOT_TYPE_NORMAL;
 
     prev.boots = valid ? (magic & 0xFFFFu) : 0;
     if (valid) {

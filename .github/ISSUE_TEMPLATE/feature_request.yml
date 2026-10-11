@@ -1,0 +1,16 @@
+name: Feature request or new hardware
+description: A DAC format, host, board or feature you would like supported
+labels: [enhancement]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What you would like
+      description: The feature, DAC or host, and what you would use it for.
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: Details
+      description: For a DAC - the chip, its data sheet or timing diagram, word length and clocks it needs. For a host - what it does today with the device (`python tools/diag.py` output helps).

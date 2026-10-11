@@ -1,35 +1,53 @@
-"""Live monitor of the usb2spdif bridge: sessions, format, data rate, silence.
+"""Live monitor of PicoI2S: sessions, format, data rate, silence.
 
 Polls the device's diagnostic string (tools/diag.py) and its session string
 a few times per second and prints one timestamped line per event:
 
-    device connected / disconnected / rebooted (with the crash record)
-    stream opened (format and PCM data rate) / closed / format changed
+    device connected / disconnected / rebooted (with the uptime, the crash
+        record, the firmware version and build, and the configuration:
+        board, build type, USB mode, output format, filter, jumper states)
+    stream opened (format, PCM data rate, volume) / closed / format changed
     playing (stream samples going out) / stalled / underrun
     S/PDIF output on / off (3 s after the audio ended)
+    output state: clk_sys and the clock table's error, I2S oversampling,
+        S/PDIF word length (on every change), de-emphasis on / off, USB
+        packets without whole frames
     digital silence (all-zero samples for --silence seconds) / signal
-    volume changes, clock lock (UAC1), counter increases (ov, lt)
+    volume changes, clock lock (UAC1 and the S/PDIF input), counter increases
+    (ov, lt, late I2S blocks)
+    S/PDIF input: lock / loss of lock per input (coax, Toslink), the input
+        selected and its rate, playing / stopped playing, the output
+        changing hands between USB and the input, pre-emphasis on / off,
+        non-PCM data, receiver error counter increases
 
 With --status N a status line is printed every N seconds while a stream is
-open: format, data rate, the sample rate measured from the device's frame
-counter against the PC clock, FIFO level, ring minimum, longest main-loop
-iteration, trim and the current silence.
+open or the input plays: format, data rate, the sample rate measured from
+the device's frame counter against the PC clock, FIFO level, ring minimum,
+highest FIFO level, longest main-loop iteration, trim and the current
+silence (for the input: its rate and offset, word length, emphasis, the
+receiver FIFO level and the silence), and the underruns and overruns since
+boot when there were any.
 
     pip install pyusb libusb-package
     python tools/monitor.py                      # until Ctrl+C
     python tools/monitor.py --status 10 --log session.log
     python tools/monitor.py --silence 2 --interval 0.5
 
-Needs the firmware's session string (index 0x23). Short events between two
-polls (a stream opened and closed within --interval) are not seen.
+Needs the firmware's session string (index 0x23); the configuration,
+version and output strings (0x24..0x26) are optional (older firmware:
+"not reported"). Short events between two polls (a stream opened and closed
+within --interval) are not seen.
 """
 import argparse
+import calendar
 import sys
 import time
 
 import libusb_package
 
-from diag import STRID_DIAG, STRID_SESSION, parse_session, parse_status, read_diag
+from diag import (STRID_CONFIG, STRID_DIAG, STRID_OUTPUT, STRID_SESSION, STRID_VERSION,
+                  parse_config, parse_output, parse_session, parse_status, parse_version,
+                  read_diag)
 
 # Measured sample rate: frame counter against the PC clock over this window,
 # reported once half of it is filled. The USB read latency limits it to
@@ -55,10 +73,103 @@ def fmt_format(rate, bits):
     return f"{rate} Hz / {bits}-bit ({mbit:.3f} Mbit/s)"
 
 
+INPUTS = {"coax": "coax", "toslink": "Toslink"}
+
+
+def fmt_input(se):
+    """Selected input's rate, offset and channel status, from the session."""
+    if not se.get("input_rate"):
+        return "no rate"
+    s = f"{se['input_rate']} Hz, {se['input_ppm']:+d} ppm"
+    cs = se.get("cs") or {}
+    if cs:
+        s += f", {cs['bits']}-bit"
+        if cs["emphasis"]:
+            s += ", pre-emphasis"
+        if not cs["pcm"]:
+            s += ", non-PCM"
+    return s
+
+
 def fmt_volume(v):
     if v is None:
         return "?"
     return "muted" if v == "M" else ("0 dB" if v == 0 else f"-{v} dB")
+
+
+BOARDS = {"rp2350-one": "Waveshare RP2350-One", "pico2": "Raspberry Pi Pico 2"}
+BUILDS = {"normal": "normal build", "selftest": "self-test build", "tone": "test-tone build",
+          "tone+selftest": "test-tone + self-test build"}
+FORMATS = {
+    "i2s": "I2S (Philips), MCLK on", "lj": "left-justified, MCLK on",
+    "rj16": "right-justified 16-bit, MCLK on", "rj24": "right-justified 24-bit, MCLK on",
+    "tda1541a": "TDA1541A simultaneous mode 16-bit, DEM clock on",
+    "dual16": "dual-line 16-bit (PCM56)", "dual18": "dual-line 18-bit (AD1865, AD1860 / AD1861)",
+    "dual20": "dual-line 20-bit (AD1862, PCM63, PCM1702)", "dual24": "dual-line 24-bit (PCM1704)",
+}
+DUAL_FORMATS = ("tda1541a", "dual16", "dual18", "dual20", "dual24")
+FILTERS = {
+    "nos": "NOS, no digital filter",
+    "sharp": "sharp, linear phase, 8x at 32 / 44.1 / 48 kHz, 4x at 88.2 / 96 kHz",
+    "slow": "slow roll-off, linear phase, 8x at 32 / 44.1 / 48 kHz, 4x at 88.2 / 96 kHz",
+    "sinc": "NOS with sin(x)/x compensation, at the sample rate",
+    "minphase": "minimum phase, 8x at 32 / 44.1 / 48 kHz, 4x at 88.2 / 96 kHz",
+}
+FILTER_CODES = ["nos", "sharp", "slow", "sinc", "minphase"]
+
+
+def version_line(ver):
+    """The version string's fields as one report line."""
+    commit = ver.get("git", "unknown")
+    if ver.get("dirty") == "1":
+        commit += ", uncommitted changes"
+    date = ver.get("date", "?")
+    try:
+        utc = time.strptime(date, "%Y-%m-%dT%H:%MZ")
+        date = time.strftime("%Y-%m-%d %H:%M", time.localtime(calendar.timegm(utc)))
+    except ValueError:
+        pass
+    return (f"firmware {ver.get('ver', '?')} build {ver.get('build', '?')} ({commit}), "
+            f"built {date}, Pico SDK {ver.get('sdk', '?')}, TinyUSB {ver.get('tinyusb', '?')}")
+
+
+def fmt_output(out):
+    """Running output's clock, oversampling and word length."""
+    parts = [f"clk_sys {out['clk_hz'] / 1e6:.6g} MHz"]
+    if out["pll_ppm"] is not None:
+        parts[0] += f" (clock table {out['pll_ppm']:+d} ppm)"
+    if out["osr"] is not None:
+        parts.append(f"I2S {out['osr']}x" if out["osr"] > 1 else "I2S at the sample rate")
+    if out["word_bits"] is not None:
+        parts.append(f"S/PDIF {out['word_bits']}-bit")
+    return ", ".join(parts)
+
+
+def config_lines(cfg, with_fw=True):
+    """The configuration string's fields as report lines (the firmware
+    version unless the version line shows it)."""
+    jumpers = cfg.get("jumpers", "?/???/???").split("/")
+    mode_j, fmt_j, flt_j = (jumpers + ["?", "???", "???"])[:3]
+    fw = cfg.get("fw", "")
+    fw = f"{int(fw[:2], 16)}.{fw[2:]}" if len(fw) == 4 and all(c in "0123456789abcdef" for c in fw) else fw
+    fmt, flt = cfg.get("format", "?"), cfg.get("filter", "?")
+    lines = [
+        f"board {BOARDS.get(cfg.get('board'), cfg.get('board'))}, "
+        f"{f'firmware {fw}, ' if with_fw else ''}"
+        f"{BUILDS.get(cfg.get('build'), cfg.get('build'))}"
+        f"{', DAC clocks kept running' if cfg.get('clocks') == 'keep' else ''}",
+        f"USB {cfg.get('mode', '?').upper()} (mode jumper GP5 {'grounded' if mode_j == '1' else 'open'})",
+        f"output format {FORMATS.get(fmt, fmt)} (jumpers GP8 GP7 GP6 = {fmt_j})",
+    ]
+    code = int(flt_j, 2) if set(flt_j) <= {"0", "1"} and flt_j else None
+    reserved = code is not None and code >= len(FILTER_CODES)
+    if fmt in DUAL_FORMATS:
+        lines.append(f"filter {FILTERS.get(flt, flt)} (jumpers GP2 GP3 GP4 = {flt_j}"
+                     f"{', a reserved code' if reserved else ''})")
+    else:
+        lines.append(f"filter none, I2S / LJ / RJ are never filtered (jumpers GP2 GP3 GP4 = {flt_j}: "
+                     f"{'reserved, sharp' if reserved else flt} for the dual-line formats)")
+    return lines
 
 
 class Monitor:
@@ -68,11 +179,15 @@ class Monitor:
         self.log = open(args.log, "a", encoding="utf-8") if args.log else None
         self.prev = None          # last parsed status
         self.sess = None          # last parsed session
+        self.outp = None          # last parsed output state
+        self.outp_new = None
         self.present = None
         self.open_since = None
         self.play_since = None
         self.silent_since = None
         self.tx_since = None
+        self.input_since = None   # the S/PDIF input playing since
+        self.prev_owner = None    # last source heard
         self.streams_total = 0
         self.streaming_total = 0.0
         self.frames_hist = []     # (t, frames) while playing, for the measured rate
@@ -91,20 +206,23 @@ class Monitor:
         if st is None:
             return None, None, raw
         se = parse_session(read_diag(self.backend, STRID_SESSION))
+        self.outp_new = parse_output(read_diag(self.backend, STRID_OUTPUT))
         return st, se, raw
 
     # ---- events ---------------------------------------------------------
 
-    def device_change(self, st, raw):
+    def device_change(self, st, se, raw):
         present = st is not None
         if present == self.present:
             return
         if present:
             mode = "UAC1" if st["uac1"] else "UAC2"
             host = {"a": "Apple host", "o": "non-Apple host", "1": "adaptive"}[st["host"]]
-            self.out(f"device connected: {mode}, {host}, boot {st['boots']}")
+            up = f", up {fmt_duration(se['up_ms'] / 1000)}" if se else ""
+            self.out(f"device connected: {mode}, {host}, boot {st['boots']}{up}")
             if st["prev"] != "none":
                 self.out(f"  previous boot ended in: {st['prev']} ({raw.split(' | ')[0]})")
+            self.config_report()
         elif self.present is not None:
             self.out(f"device disconnected ({raw})")
             self.close_stream_state()
@@ -130,12 +248,15 @@ class Monitor:
             starts = (se["streams"] - self.sess["streams"]) & 0xFFFFFFFF
 
         if is_open and not was_open:
-            self.out(f"stream opened: {fmt_format(st['rate'], st['bits'])}")
+            self.out(f"stream opened: {fmt_format(st['rate'], st['bits'])}, "
+                     f"volume {fmt_volume(st['volume'])}")
             self.open_since = now
             self.streams_total += 1
-            self.silent_since = None
+            if not (se and se.get("source") in INPUTS):
+                self.silent_since = None
         elif is_open and (fmt_changed or starts > 0):
-            self.out(f"stream restarted: {fmt_format(st['rate'], st['bits'])}"
+            self.out(f"stream restarted: {fmt_format(st['rate'], st['bits'])}, "
+                     f"volume {fmt_volume(st['volume'])}"
                      + (f" ({starts} starts)" if starts > 1 else ""))
             self.streams_total += 1
             self.frames_hist.clear()
@@ -154,7 +275,9 @@ class Monitor:
             self.out("playing")
             self.play_since = now
         elif prev_run and not run:
-            if is_open:
+            if is_open and se and se.get("source") in INPUTS:
+                pass    # the input took the output: input_events() reports it
+            elif is_open:
                 ur_inc = f.get("ur", 0) - (p["fields"].get("ur", 0) if p else 0)
                 if ur_inc > 0:
                     self.out(f"underrun: output ring ran dry ({f.get('ur', 0)} this stream)")
@@ -179,29 +302,103 @@ class Monitor:
             if p is not None and is_open and inc > 0:
                 self.out(f"{name}: +{inc} ({f.get(key, 0)} this stream)")
 
+        if (se and self.sess and se.get("i2s_late") is not None
+                and self.sess.get("i2s_late") is not None):
+            inc = (se["i2s_late"] - self.sess["i2s_late"]) & 0xFFFFFFFF
+            if inc > 0:
+                self.out(f"late I2S block: +{inc} ({se['i2s_late']} since boot)")
+
         if p is not None and st["volume"] != p["volume"]:
             self.out(f"volume {fmt_volume(st['volume'])}")
 
-        if st["uac1"] and p is not None and st["locked"] != p["locked"] and run:
+        # The input's trim counts as playing too (run is USB playback).
+        trimmed_play = run or (se and se.get("source") in ("coax", "toslink"))
+        if st["trim"] is not None and p is not None and st["locked"] != p["locked"] and trimmed_play:
             if st["locked"]:
                 self.out(f"clock locked, trim {st['trim']:+d} ppm")
             else:
                 self.out(f"clock unlocked, trim {st['trim']:+d} ppm")
 
+    def input_events(self, se, now):
+        """S/PDIF input: locks, selection, source changes, flags, errors."""
+        if se is None or se["source"] is None:
+            return    # firmware without the input tokens
+        q = self.sess if self.sess is not None and self.sess["source"] is not None else None
+        prev_locked = q["locked"] if q else {"coax": False, "toslink": False}
+        prev_sel = q["input"] if q else "none"
+        prev_rate = q["input_rate"] if q else 0
+        sel = se["input"]
+        announced = False
+        for name, label in INPUTS.items():
+            if se["locked"][name] == prev_locked[name]:
+                continue
+            if not se["locked"][name]:
+                self.out(f"{label} input lost lock")
+            elif sel == name and prev_sel != name:
+                self.out(f"{label} input locked and selected: {fmt_input(se)}")
+                announced = True
+            else:
+                self.out(f"{label} input locked")
+        if not announced and (sel, se["input_rate"]) != (prev_sel, prev_rate):
+            if sel == "none":
+                if prev_sel != "none":
+                    self.out("no S/PDIF input selected")
+            else:
+                self.out(f"{INPUTS[sel]} input selected: {fmt_input(se)}")
+
+        cs, prev_cs = se["cs"] or {}, (q["cs"] or {}) if q else {}
+        emph, prev_emph = bool(cs) and cs["emphasis"], bool(prev_cs) and prev_cs["emphasis"]
+        if emph != prev_emph:
+            self.out("input pre-emphasis on (50/15 us)" if emph else "input pre-emphasis off")
+        data, prev_data = bool(cs) and not cs["pcm"], bool(prev_cs) and not prev_cs["pcm"]
+        if data != prev_data:
+            self.out("non-PCM data on the input (played as silence)" if data else "PCM data on the input")
+
+        src, prev_src = se["source"], (q["source"] if q else "none")
+        if src != prev_src:
+            if src in INPUTS:
+                took = " (USB idle for 3 s)" if prev_src == "usb" or self.prev_owner == "usb" else ""
+                self.out(f"playing: {INPUTS[src]} input, {fmt_input(se)}{took}")
+                self.input_since = now
+                self.silent_since = None
+            elif prev_src in INPUTS:
+                dur = fmt_duration(now - self.input_since) if self.input_since else "?"
+                if src == "usb":
+                    self.out(f"USB took the output back from the {INPUTS[prev_src]} input after {dur}")
+                else:
+                    self.out(f"{INPUTS[prev_src]} input stopped playing after {dur} "
+                             "(lost lock, discontinuity or no samples)")
+                self.input_since = None
+                self.silent_since = None
+        if src != "none":
+            self.prev_owner = src
+
+        if q and se["rx"] and q["rx"]:
+            inc = {k: (se["rx"][k] - q["rx"][k]) % 100000 for k in ("parity", "framing", "overflows")}
+            if any(inc.values()):
+                self.out("input errors: " + ", ".join(f"+{v} {k}" for k, v in inc.items() if v)
+                         + f" (since boot: {se['rx']['parity']} parity, {se['rx']['framing']} framing, "
+                         f"{se['rx']['overflows']} overflows)")
+
     def silence_events(self, st, se, now):
-        if se is None or st["link"] != "S" or not st["fields"].get("run", 0):
+        if se is None:
             return
+        on_input = se.get("source") in INPUTS
+        if not on_input and (st["link"] != "S" or not st["fields"].get("run", 0)):
+            return
+        start = self.input_since if on_input else self.open_since
         age = se["signal_age_ms"]
         silent = age is None or age >= self.args.silence * 1000.0
         if silent and self.silent_since is None:
             # The silence began when the last non-zero sample went out, or
-            # with this stream if that was before it opened.
+            # with this stream (or input) if that was before it started.
             began = now - (age / 1000.0 if age is not None else 0.0)
-            from_open = self.open_since is not None and began <= self.open_since + self.args.interval
+            from_open = start is not None and began <= start + self.args.interval
             if from_open:
-                began = self.open_since
+                began = start
             self.silent_since = began
-            self.out("digital silence" + (" since the stream opened" if from_open else ""))
+            what = " since the input started playing" if on_input else " since the stream opened"
+            self.out("digital silence" + (what if from_open else ""))
         elif not silent and self.silent_since is not None:
             self.out(f"signal after {fmt_duration(now - self.silent_since)} of silence")
             self.silent_since = None
@@ -211,6 +408,38 @@ class Monitor:
             self.out(f"device rebooted: boot {st['boots']}, previous ended in {st['prev']}"
                      + ("" if st["prev"] == "none" else f" ({raw.split(' | ')[0]})"))
             self.close_stream_state()
+            # The session counters restarted: compare against nothing.
+            self.sess = None
+            self.input_since = None
+            self.config_report()
+
+    def output_events(self, out):
+        """Output clock, oversampling and word length; de-emphasis; bad
+        USB packets."""
+        if out is None:
+            return
+        q = self.outp
+        key = (out["clk_hz"], out["pll_ppm"], out["osr"], out["word_bits"])
+        on = out["pll_ppm"] is not None
+        if on and (q is None or key != (q["clk_hz"], q["pll_ppm"], q["osr"], q["word_bits"])):
+            self.out(f"output: {fmt_output(out)}")
+        if out["emphasis"] != (q["emphasis"] if q else False):
+            self.out("de-emphasis on: S/PDIF flagged, I2S / dual-line de-emphasised"
+                     if out["emphasis"] else "de-emphasis off")
+        if q and out["bad_packets"] > q["bad_packets"]:
+            self.out(f"USB packets without whole frames: +{out['bad_packets'] - q['bad_packets']} "
+                     f"({out['bad_packets']} since boot)")
+
+    def config_report(self):
+        ver = parse_version(read_diag(self.backend, STRID_VERSION))
+        self.out(f"  config: {version_line(ver)}" if ver else
+                 "  config: version not reported (firmware without the version string)")
+        cfg = parse_config(read_diag(self.backend, STRID_CONFIG))
+        if cfg is None:
+            self.out("  config: not reported (firmware without the configuration string)")
+            return
+        for line in config_lines(cfg, with_fw=ver is None):
+            self.out(f"  config: {line}")
 
     # ---- measured rate and status ---------------------------------------
 
@@ -234,39 +463,60 @@ class Monitor:
         return ((f1 - f0) % 4294967296.0) / (t1 - t0)
 
     def status_line(self, st, se, now):
-        if not self.args.status or st["link"] != "S":
+        on_input = se is not None and se.get("source") in INPUTS
+        if not self.args.status or (st["link"] != "S" and not on_input):
             return
         if now - self.last_status_t < self.args.status:
             return
         self.last_status_t = now
+        if on_input:
+            parts = [f"{INPUTS[se['source']]} input", fmt_input(se)]
+            if self.outp and self.outp["rx_level"] is not None:
+                parts.append(f"receiver FIFO {self.outp['rx_level']} frames")
+            if self.silent_since is not None:
+                parts.append(f"silence {fmt_duration(now - self.silent_since)}")
+            parts += self.totals()
+            self.out("status: " + ", ".join(parts))
+            return
         f = st["fields"]
         rate = self.measured_rate()
         parts = [fmt_format(st["rate"], st["bits"])]
         if rate is not None:
             parts.append(f"measured {rate:.1f} Hz ({(rate / st['rate'] - 1) * 1e6:+.0f} ppm)")
         parts.append("playing" if f.get("run") else "not playing")
-        parts.append(f"fifo {f.get('ff', 0)} B")
+        parts.append(f"fifo {f.get('ff', 0)} B (max {f.get('fmax', 0)})")
         parts.append(f"ring min {f.get('rmin', 0)}")
         parts.append(f"loop {f.get('lp', 0) / 1000:.2f} ms")
-        if st["uac1"]:
+        if st["trim"] is not None:
             parts.append(f"trim {st['trim']:+d} ppm {'locked' if st['locked'] else 'unlocked'}")
         parts.append(fmt_volume(st["volume"]))
         if self.silent_since is not None:
             parts.append(f"silence {fmt_duration(now - self.silent_since)}")
+        parts += self.totals()
         self.out("status: " + ", ".join(parts))
+
+    def totals(self):
+        o = self.outp
+        if not o or not (o["underruns"] or o["overruns"]):
+            return []
+        return [f"since boot {o['underruns']} underruns, {o['overruns']} overruns"]
 
     # ---- loop -----------------------------------------------------------
 
     def step(self):
         now = time.monotonic()
         st, se, raw = self.read()
-        self.device_change(st, raw)
+        self.device_change(st, se, raw)
         if st is None:
-            self.prev, self.sess = None, None
+            self.prev, self.sess, self.outp = None, None, None
             return
         self.reboot_events(st, raw)
         self.stream_events(st, se, now)
+        self.input_events(se, now)
         self.silence_events(st, se, now)
+        self.output_events(self.outp_new)
+        if self.outp_new is not None:
+            self.outp = self.outp_new
         self.track_frames(st, se, now)
         self.status_line(st, se, now)
         self.prev, self.sess = st, se
@@ -277,7 +527,7 @@ class Monitor:
         self.out(f"summary: {self.streams_total} stream starts, {fmt_duration(total)} streaming")
 
     def run(self):
-        self.out("monitoring usb2spdif (Ctrl+C to stop)")
+        self.out("monitoring PicoI2S (Ctrl+C to stop)")
         try:
             while True:
                 self.step()

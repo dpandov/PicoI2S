@@ -1,0 +1,17 @@
+; Trim pacer: writes a CLKDIV value at cycle-exact times (spdif_trim.h).
+; Configure: clock divider 1, autopull and autopush at 32. TX: pairs of
+; (delay, value) words; RX: each value at the end of its half, for a DMA
+; channel that writes it into the trimmed state machine's CLKDIV.
+;
+; One half lasts delay + 4 cycles: out, delay + 1 passes of the jmp, out,
+; in (SPDIF_TRIM_HALF_EXTRA). Two outs are never back to back, so the
+; autopull refill never stalls one while the TX FIFO has data.
+
+.program spdif_pacer
+.wrap_target
+    out x, 32
+delay:
+    jmp x-- delay
+    out y, 32
+    in y, 32
+.wrap
