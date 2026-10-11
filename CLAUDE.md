@@ -212,8 +212,13 @@ Pending:
 
 ## Git rules
 
-- Branches: `main` holds releases only (merge commits from `develop`,
-  tagged `vx.yy`, never squashed so build numbers stay comparable);
+- Branches: `main` holds releases only, one commit "Release x.yy" each,
+  tagged `vx.yy`. A release: commit "Release x.yy" on `develop` (version,
+  changelog date), pull request `develop` -> `main` squash-merged on
+  GitHub, tag on the new `main` commit, then `git merge -s ours
+  origin/main -m "Merge main into develop after release x.yy"` on
+  `develop` so the next pull request diffs from the release. Build
+  numbers on `main` count releases, on `develop` all commits.
   `develop` integrates; work goes on `feature/<topic>` / `fix/<topic>`
   from `develop`. No CI: release files are built from the tag and
   attached to the GitHub release by hand.

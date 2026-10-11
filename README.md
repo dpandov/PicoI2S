@@ -28,6 +28,13 @@ bundled with the Pico SDK is not used.
 
 ## Quick start
 
+Ready-made firmware is attached to each
+[release](https://github.com/dpandov/PicoI2S/releases):
+`PicoI2S-<version>-rp2350-one.uf2` for the Waveshare RP2350-One,
+`PicoI2S-<version>-pico2.uf2` for the Raspberry Pi Pico 2, both the
+default build (the [build options](#building) need a build from source).
+With one of those, skip to step 4. To build it yourself:
+
 1. Install [VS Code](https://code.visualstudio.com/) with the
    [Raspberry Pi Pico extension](https://marketplace.visualstudio.com/items?itemName=raspberry-pi.raspberry-pi-pico);
    it brings the SDK, compiler, CMake and picotool.

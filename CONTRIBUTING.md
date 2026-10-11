@@ -18,7 +18,9 @@ most.
 
 ## Branches
 
-- `main` holds the releases; every commit on it is tagged `vx.yy`.
+- `main` holds the releases only: one commit "Release x.yy" per release,
+  tagged `vx.yy`, with the complete state of `develop` at that point.
+  The development history is on `develop`.
 - `develop` is where work is integrated. Base your branch on `develop`
   and open the pull request against it.
 - Name branches `feature/<topic>` or `fix/<topic>`, one change each.
@@ -71,9 +73,21 @@ The version is set in `CMakeLists.txt` (`project(PicoI2S VERSION x.y)`)
 and is also the USB device release: it is raised for every release and
 every USB descriptor change (Windows caches descriptors per version), the
 major number only for changes that break existing setups (USB identity,
-pins, jumper meanings). A release is a merge of `develop` into `main`
-with a merge commit, tagged `vx.yy`; the firmware files for both boards
-are built from the tag and attached to its GitHub release.
+pins, jumper meanings). A release goes through a pull request:
+
+1. On `develop`, a commit "Release x.yy" sets the version and dates the
+   changelog.
+2. A pull request from `develop` to `main` titled "Release x.yy", merged
+   with "Squash and merge": one commit on `main`.
+3. The tag `vx.yy` on that commit (GitHub release, or
+   `git tag -a vx.yy origin/main`), with the firmware files for both
+   boards built from it.
+4. `main` merged back into `develop`, keeping `develop`'s files, so the
+   next pull request shows only the new changes:
+   `git merge -s ours origin/main -m "Merge main into develop after release x.yy"`.
+
+A build from `main` counts the release commits as its build number, a
+build from `develop` all of its commits.
 
 ## License
 
