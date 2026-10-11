@@ -91,6 +91,13 @@ void spdif_tx_stop(void);
 
 bool spdif_tx_running(void);
 
+// Turns the line off (pin held low, no carrier) or back on while the
+// output runs: the state machine, the source and the companion carry on.
+// spdif_tx_start() turns it on.
+void spdif_tx_set_line(bool on);
+// Running with the line on.
+bool spdif_tx_line_on(void);
+
 // Current output format; 0 when stopped.
 uint32_t spdif_tx_sample_rate(void);
 uint8_t spdif_tx_word_bits(void);

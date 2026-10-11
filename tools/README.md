@@ -132,7 +132,10 @@ is covered by the PIO simulation, not here.
 
 **Stop test.** After the sweep the S/PDIF output must send silence 2 s after
 the stream closed and be stopped (line idle low) 4.5 s after. The I2S
-output must be silent, then stopped with all pins low.
+output must be silent, then stopped with all pins low. With a
+`PICOI2S_KEEP_CLOCKS` build (configuration string `clocks=keep`) S/PDIF
+stops the same way, but the I2S output must still send silence at the
+last rate after 4.5 s.
 
 **Soak.** One format plays continuously and is read every `--interval`
 seconds. Every failed check or counter increase is logged with a time
@@ -162,7 +165,7 @@ e.g. #812 ok tx48000/24 f577 z0 e0 p0 o0 v0 s0 c1020B fs47991 B2 G0 K1
 |---|---|
 | state | `ok`, `sil` (silent frames), `idle` (output stopped, line static), `wait`; failures in capitals: `ERR`, `NOSYNC`, `NOCARR`, `CARRIER`, `CAPTMO`, `NOPIO` |
 | `c` | `1` channel status matches, `0` differs, `-` no complete block, `x` C bit differs between subframes; then cs3, the rate code (00 44.1k, 02 48k, 03 32k, 08 88.2k, 0A 96k), and cs4, the length (02 16, 0B 24) |
-| `B G K` | cumulative windows: bad, with gaps (dropouts), skipped (format or clock change during the capture) |
+| `B G K` | cumulative windows: bad, with gaps (dropouts), skipped (format or clock change, volume ramp or source-switch fade during the capture) |
 
 I2S report (string 0x22, same sequence number as the S/PDIF window):
 
@@ -356,8 +359,9 @@ and by `monitor.py` on connect) is fixed at boot:
 board=<rp2350-one|pico2> fw=<bcdDevice> build=<normal|selftest|tone|tone+selftest>
     mode=<uac2|uac1> format=<i2s|lj|rj16|rj24|tda1541a|dual16|dual18|dual20|dual24>
     filter=<nos|sharp|slow|sinc|minphase> jumpers=<GP5>/<GP8 GP7 GP6>/<GP2 GP3 GP4>
+    clocks=<stop|keep>
 
-e.g. board=rp2350-one fw=0103 build=normal mode=uac2 format=i2s filter=nos jumpers=0/000/000
+e.g. board=rp2350-one fw=0104 build=normal mode=uac2 format=i2s filter=nos jumpers=0/000/000 clocks=stop
 ```
 
 `filter` is what the filter jumpers select (reserved codes: sharp), also

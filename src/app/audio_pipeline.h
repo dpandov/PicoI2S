@@ -88,6 +88,10 @@ void audio_pipeline_task(void);
 // USB stream samples are going out (pre-roll done, no underrun since).
 bool audio_pipeline_playing(void);
 
+// Time since the attenuation applied to the ring last changed (a volume
+// ramp or a source-switch fade).
+uint32_t audio_pipeline_ramp_age_ms(void);
+
 void audio_pipeline_get_stats(audio_pipeline_stats_t *stats);
 void audio_pipeline_get_session(audio_pipeline_session_t *session);
 void audio_pipeline_get_source(audio_pipeline_source_t *source);

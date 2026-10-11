@@ -83,11 +83,13 @@ tools/monitor.py) carries the configuration, fixed at boot:
     board=<rp2350-one|pico2> fw=<bcdDevice hex> build=<normal|selftest|tone|
         tone+selftest> mode=<uac2|uac1> format=<i2s|lj|rj16|rj24|tda1541a|
         dual16|dual18|dual20|dual24> filter=<nos|sharp|slow|sinc|minphase>
-        jumpers=<GP5>/<GP8 GP7 GP6>/<GP2 GP3 GP4>
+        jumpers=<GP5>/<GP8 GP7 GP6>/<GP2 GP3 GP4> clocks=<stop|keep>
 
     filter is what the filter jumpers select (reserved codes: sharp), also
-    for I2S / LJ / RJ, which never use it. jumpers: 1 = grounded.
-    e.g. board=rp2350-one fw=0103 build=normal mode=uac2 format=i2s filter=nos jumpers=0/000/000
+    for I2S / LJ / RJ, which never use it. jumpers: 1 = grounded. clocks:
+    keep with the PICOI2S_KEEP_CLOCKS build, whose I2S / dual-line clocks
+    keep running with silence (S/PDIF still stops; tx follows S/PDIF).
+    e.g. board=rp2350-one fw=0104 build=normal mode=uac2 format=i2s filter=nos jumpers=0/000/000 clocks=stop
 """
 import re
 import sys

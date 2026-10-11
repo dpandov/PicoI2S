@@ -42,6 +42,14 @@
 // The take-back switches once the faded-out input has left the DMA buffers
 // and the I2S path (one block plus the filter's group delay).
 #define HANDOVER_FRAMES (DMA_FRAMES + 2u * SPDIF_TX_BUFFER_FRAMES)
+// Build option: the outputs never idle (keep_clocks()).
+#ifndef PICOI2S_KEEP_CLOCKS
+#define PICOI2S_KEEP_CLOCKS 0
+#endif
+// Rate of the idle output before the first stream (the UAC1 default), and
+// the hold-off after a failed start.
+#define KEEP_RATE_DEFAULT 48000u
+#define KEEP_RETRY_US     500000u
 
 _Static_assert((RING_FRAMES & RING_MASK) == 0, "ring size must be a power of two");
 _Static_assert(RING_TARGET <= RING_FRAMES, "ring target exceeds the ring");
@@ -80,6 +88,9 @@ typedef struct {
     uint32_t frames;
     uint8_t  att;             // attenuation applied to the ring, 0 .. ATT_SILENT
     bool     fade_in;         // the next USB start fades in (take-back)
+    uint32_t ramp_ms;         // last change of the applied attenuation
+    uint32_t keep_rate;       // PICOI2S_KEEP_CLOCKS: rate of the last output
+    uint64_t keep_retry_us;   // PICOI2S_KEEP_CLOCKS: no start before this
     uint32_t start_failures;
     uint32_t overruns_base;   // counts when the stream started
     uint32_t late_irqs_base;
@@ -224,6 +235,9 @@ static void apply_volume(uint32_t wr, uint32_t n, uint8_t att0, uint8_t att1) {
 static void ramp_chunk(uint32_t wr, uint32_t n, uint8_t target, uint8_t step) {
     uint8_t att0 = p.att;
     att_step(target, step);
+    if (p.att != att0) {
+        p.ramp_ms = to_ms_since_boot(get_absolute_time());
+    }
     if (att0 != 0 || p.att != 0) {
         apply_volume(wr, n, att0, p.att);
     }
@@ -444,6 +458,7 @@ static void play_begun(void) {
     // After the fill: a flag raised before it is stale.
     ring_short = false;
     p.playing = true;
+    spdif_tx_set_line(true);
     if (p.first_play) {
         // Keep the start-up (pre-roll peak, clock switch, pre-fill) out of
         // the maxima. This iteration is only measured at the next
@@ -778,6 +793,40 @@ static void arbitrate(bool open, const usb_audio_format_t *f, uint64_t now) {
     }
 }
 
+// PICOI2S_KEEP_CLOCKS: the DAC clocks never stop. A stopped output (boot, a
+// rate change, a source switch) restarts at once with silence and the
+// S/PDIF line off, set up as the current source will start it, which then
+// finds it running and turns the line on (play_begun()).
+static void keep_clocks(uint64_t now) {
+    if (spdif_tx_running()) {
+        p.keep_rate = spdif_tx_sample_rate();
+        return;
+    }
+    if (now < p.keep_retry_us) {
+        return;
+    }
+    uint32_t rate;
+    uint32_t options;
+    if (p.src == SRC_USB) {
+        rate = p.open ? p.rate : p.keep_rate;
+        options = adaptive() ? SPDIF_TX_START_TRIMMED : 0u;
+    } else {
+        rate = in.rate ? in.rate : input_ready() ? in.st.sample_rate : p.keep_rate;
+        options = SPDIF_TX_START_TRIMMED | SPDIF_TX_START_EMPHASIS;
+    }
+    clock_follow(rate);
+    if (!output_start(rate, 24u, options)) {
+        p.keep_retry_us = now + KEEP_RETRY_US;
+        return;
+    }
+    spdif_tx_set_line(false);
+    // As a fresh start: the clock table's error removed.
+    if (options & SPDIF_TX_START_TRIMMED) {
+        spdif_tx_set_trim_ppb(-spdif_tx_rate_error_ppb());
+    }
+    p.keep_rate = rate;
+}
+
 void audio_pipeline_init(void) {
     ring_wr = 0;
     ring_rd = 0;
@@ -787,6 +836,7 @@ void audio_pipeline_init(void) {
     in = (input_t){0};
     // Boot counts as USB activity: the input waits USB_IDLE_US for a host.
     p.usb_heard_us = time_us_64();
+    p.keep_rate = KEEP_RATE_DEFAULT;
 }
 
 void audio_pipeline_task(void) {
@@ -840,7 +890,10 @@ void audio_pipeline_task(void) {
     }
 
     if (now - p.last_audio_us >= IDLE_STOP_US) {
-        if (spdif_tx_running()) {
+        // With kept clocks only the S/PDIF line stops.
+        if (PICOI2S_KEEP_CLOCKS) {
+            spdif_tx_set_line(false);
+        } else if (spdif_tx_running()) {
             output_stop();
         }
         if (p.src == SRC_INPUT) {
@@ -848,10 +901,18 @@ void audio_pipeline_task(void) {
             switch_source(SRC_USB, now);
         }
     }
+
+    if (PICOI2S_KEEP_CLOCKS) {
+        keep_clocks(now);
+    }
 }
 
 bool audio_pipeline_playing(void) {
     return p.playing && p.src == SRC_USB;
+}
+
+uint32_t audio_pipeline_ramp_age_ms(void) {
+    return to_ms_since_boot(get_absolute_time()) - p.ramp_ms;
 }
 
 void audio_pipeline_get_stats(audio_pipeline_stats_t *stats) {

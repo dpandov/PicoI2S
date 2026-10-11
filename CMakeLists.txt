@@ -88,6 +88,13 @@ if(PICOI2S_RJ24)
     target_compile_definitions(PicoI2S PRIVATE PICOI2S_RJ24=1)
 endif()
 
+# Keeps the outputs running with silence from boot instead of stopping them
+# 3 s after the audio, for DACs that dislike losing their clocks.
+option(PICOI2S_KEEP_CLOCKS "Never stop the outputs: send silence while idle" OFF)
+if(PICOI2S_KEEP_CLOCKS)
+    target_compile_definitions(PicoI2S PRIVATE PICOI2S_KEEP_CLOCKS=1)
+endif()
+
 # Decodes the S/PDIF and I2S outputs on core 1 and reports them as USB
 # strings, for tools/selftest.py (src/selftest/selftest.h). With the test
 # tone, only framing and channel status are checked.

@@ -117,7 +117,8 @@ static void update_diag_status(void) {
                      uac1 ? '1' : (usb_host_is_apple() ? 'a' : 'o'),
                      (unsigned long)f.sample_rate, f.resolution, s.fifo_level,
                      clamp_cnt(ps.underruns, max), audio_pipeline_playing() ? 1 : 0,
-                     status_led_is_on() ? 1 : 0, (unsigned long)spdif_tx_sample_rate(),
+                     status_led_is_on() ? 1 : 0,
+                     (unsigned long)(spdif_tx_line_on() ? spdif_tx_sample_rate() : 0u),
                      clamp_cnt(ps.overruns, max), clamp_cnt(ps.late_irqs, max),
                      clamp_cnt(ps.ring_min, max), clamp_cnt(ps.fifo_max, max),
                      clamp_cnt(ps.loop_max_us, max));
@@ -263,10 +264,10 @@ static void bits3(char *s, unsigned code) {
     s[3] = '\0';
 }
 
-// Format documented in tools/diag.py, at most 105 characters. The filter
+// Format documented in tools/diag.py, at most 117 characters. The filter
 // is the jumper setting even where it is not used (I2S / LJ / RJ).
 const char *monitor_config_string(void) {
-    static char buf[112];
+    static char buf[128];
 #if PICOI2S_BOARD_RP2350_ONE
     const char *board = "rp2350-one";
 #else
@@ -281,13 +282,19 @@ const char *monitor_config_string(void) {
 #else
     const char *build = "normal";
 #endif
+#if PICOI2S_KEEP_CLOCKS
+    const char *clocks = "keep";
+#else
+    const char *clocks = "stop";
+#endif
     bool uac1 = usb_audio_mode() == USB_AUDIO_MODE_UAC1;
     char fmt_bits[4], flt_bits[4];
     bits3(fmt_bits, (unsigned)config_format);
     bits3(flt_bits, config_filter_code);
-    snprintf(buf, sizeof(buf), "board=%s fw=%04x build=%s mode=%s format=%s filter=%s jumpers=%c/%s/%s",
+    snprintf(buf, sizeof(buf),
+             "board=%s fw=%04x build=%s mode=%s format=%s filter=%s jumpers=%c/%s/%s clocks=%s",
              board, USB_BCD_DEVICE, build, uac1 ? "uac1" : "uac2", i2s_format_name(config_format),
              i2s_filter_name(i2s_filter_from_code(config_filter_code)), uac1 ? '1' : '0', fmt_bits,
-             flt_bits);
+             flt_bits, clocks);
     return buf;
 }

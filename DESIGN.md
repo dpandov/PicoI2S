@@ -51,6 +51,23 @@ tools); `CLAUDE.md` holds the working rules and the current status.
 - One stop rule: the output sends silence and stops 3 s after the last
   stream sample entered the ring, which covers both a closed stream and a
   stall. Digital silence inside an open stream is still audio.
+- `PICOI2S_KEEP_CLOCKS` (build option, `keep_clocks()`): the DAC clocks
+  never stop. The idle stop only turns the S/PDIF line off
+  (`spdif_tx_set_line()`: the pin becomes a GPIO held low, while the
+  S/PDIF state machine, whose interrupt feeds the I2S path, keeps running),
+  and `play_begun()` turns it back on. An output that stops anyway (boot, a
+  rate change, a source switch) restarts in the same main-loop iteration
+  with silence and the line off, set up as the current source will start
+  it: the source's rate (48 kHz before the
+  first stream), trimmed in UAC1 and for the input (at the clock table's
+  error, as a fresh start), with the emphasis option for the input. The
+  source's own start then finds a running output and only fills the ring.
+  A restart cannot be avoided where the rate changes (clk_sys switches)
+  or where the trim mode changes (UAC2 USB runs untrimmed, the input
+  trimmed); in UAC1 only a rate change restarts. A failed start retries
+  after 500 ms. The configuration string reads `clocks=keep`; the
+  diagnostic `tx` token and the self-test's S/PDIF report follow the line,
+  so the tools see S/PDIF stop as in the default build.
 - Start: pre-roll until the FIFO holds its set point plus what the start
   pulls out (ring target and two DMA buffers), so a stream starts with
   steady-state buffering; then the output starts, switching the PLL first
@@ -120,7 +137,9 @@ tools); `CLAUDE.md` holds the working rules and the current status.
   linearly from the previous step's to the new one (`apply_volume()`), so
   a step has no edge. The source-switch fades use the same ramp at 6 dB
   per chunk (`FADE_DB`). The diag token `v<dB>` / `vM` shows the
-  target. Volume applies to every output (it is in the ring).
+  target. Volume applies to every output (it is in the ring). The
+  self-test discards windows within 100 ms of a change of the applied
+  attenuation (`audio_pipeline_ramp_age_ms()`): a ramp is not bit-exact.
 
 ## Trim pacer (`src/spdif/spdif_pacer.pio`, `spdif_trim.h`)
 
@@ -444,6 +463,13 @@ MCLK meter.
   every format, filter and clock. Real hardware: an AD1865 in dual18 with
   every filter, and again after each LATCH change (owner's listening
   tests). MCLK measured within 4 ppm of 256 Fs x (1 + trim).
+- `PICOI2S_KEEP_CLOCKS` (2026-10-11, UAC1): I2S silence at 48 kHz from
+  boot with S/PDIF off; self-test sweep with S/PDIF stopping after 3.1 s
+  and I2S still silent; input harness scenarios A to D, and the input
+  switched off: S/PDIF off 3 s later, I2S running. The default build's
+  3-s stop re-checked. In UAC2: both builds' sweeps (S/PDIF off after
+  3.3 s), scenarios A to D and 14 input cycles, no bad window (the fades
+  counted as skipped).
 - Scope (2026-10-10, de59100): dual18 at 44.1 and 48 kHz (8x), the
   input's trimmed clock, MCLK in I2S, the DEM clock in TDA1541A, the
   S/PDIF output and the 3-s stop all as calculated. At 44.1 kHz: BCLK
@@ -487,6 +513,7 @@ MCLK meter.
   | ccc06f8 | UAC1 | 44.1/16 | 2 h | optical loop, trim +233..+236 ppm, locked in all 1440 reads |
   | ccc06f8 | UAC2 | 44.1/16 | 2 h | optical loop |
   | ccc06f8 | UAC2 | 96/24 | 2 h | optical loop |
+  | keep-clocks change | UAC2 | 44.1/16, 48/24 | 2 h 45 min each | default build, dual18 minimum phase |
 
   The optical-loop soaks (2026-10-10, overnight) ran with the input
   locked on the board's own output and counted zero parity, framing and

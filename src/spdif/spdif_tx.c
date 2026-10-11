@@ -90,6 +90,7 @@ static spdif_source_fn source_fn;
 static const spdif_tx_companion_t *companion;
 static volatile bool running;
 static uint32_t tx_rate;
+static bool line_off;            // pin held low by SIO while running
 static uint32_t tx_div;          // integer PIO divider at zero trim
 static int32_t tx_error_ppb;
 static uint8_t tx_bits;
@@ -431,6 +432,10 @@ static bool tx_start(uint32_t sample_rate, uint8_t word_bits, spdif_source_fn so
     irq_time = timer_hw->timerawl;
     dma_irqn_set_channel_mask_enabled(DMA_IRQ_INDEX, data_mask, true);
 
+    if (line_off) {
+        pio_gpio_init(tx_pio, tx_pin);
+        line_off = false;
+    }
     running = true;
     // The control channel loads buffer 0 and starts the data channel. DMA
     // first so the FIFO is full before the SM pulls its first word. The
@@ -500,6 +505,23 @@ void spdif_tx_set_companion(const spdif_tx_companion_t *c) {
 
 bool spdif_tx_running(void) {
     return running;
+}
+
+void spdif_tx_set_line(bool on) {
+    if (!running || on == !line_off)
+        return;
+    if (on) {
+        pio_gpio_init(tx_pio, tx_pin);
+    } else {
+        gpio_put(tx_pin, false);
+        gpio_set_dir(tx_pin, true);
+        gpio_set_function(tx_pin, GPIO_FUNC_SIO);
+    }
+    line_off = !on;
+}
+
+bool spdif_tx_line_on(void) {
+    return running && !line_off;
 }
 
 uint32_t spdif_tx_sample_rate(void) {

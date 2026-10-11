@@ -20,6 +20,10 @@ and clones) that feeds a DAC:
 - **Host volume control** applied on the device, bit-exact at 0 dB.
 - **Set by jumpers**: USB mode, DAC format and filter.
 
+The USB stack is [TinyUSB](https://github.com/hathach/tinyusb) 0.21.0,
+included as the `lib/tinyusb` submodule at its release tag; the copy
+bundled with the Pico SDK is not used.
+
 ## Quick start
 
 1. Install [VS Code](https://code.visualstudio.com/) with the
@@ -109,7 +113,8 @@ UAC1 clock trim together. In the I2S, left- and right-justified formats
 a 256 Fs MCLK comes out on a fifth pin for DACs that need one (PCM179x,
 AK439x, CS43xx types); DACs with their own PLL (PCM5102, ES9023) ignore
 it. Clocks and data are low while nothing plays (the outputs stop 3 s
-after the audio).
+after the audio), unless the firmware is built to keep the clocks running
+(see [Building](#building)).
 
 | Signal | RP2350-One | Pico 2 | Note |
 |---|---|---|---|
@@ -390,7 +395,9 @@ USB host --iso OUT--> TinyUSB FIFO --main loop--> PCM ring --DMA IRQ: BMC encode
   for 3 seconds so the receiver stays locked across track changes and short
   pauses. After 3 seconds without audio the S/PDIF output stops (line held
   idle, no carrier), letting the receiver drop lock, auto-switch inputs or
-  go to standby. It restarts when the host streams again.
+  go to standby. It restarts when the host streams again. This holds in a
+  `PICOI2S_KEEP_CLOCKS` build too; only its DAC clocks keep running (see
+  [Building](#building)).
 - **Buffering and latency**: the USB receive FIFO is held at 6 packets
   (6 ms) at every format by the feedback (UAC2) or the clock servo (UAC1);
   it can hold 12 packets of the largest format, so there is room for a host
@@ -560,6 +567,17 @@ To check the wiring and a receiver without a USB host, build with
 
 `-DPICOI2S_RJ24=ON` turns format jumper code 010 from right-justified
 16-bit into right-justified 24-bit, for DACs that take only that format.
+
+`-DPICOI2S_KEEP_CLOCKS=ON` keeps the DAC clocks running, for DACs that
+dislike losing them (some mute with a pop, some need a reset): from
+power-up, at 48 kHz until the first stream, the I2S / dual-line outputs
+(and MCLK or DEM) send digital silence instead of stopping 3 s after the
+audio. S/PDIF still stops 3 s after USB and the S/PDIF input both become
+unavailable, and is off until a source first plays. The clocks pause
+only for a restart when the sample rate changes (the system clock is
+switched) or the source switches between USB and the S/PDIF input; the
+3-s stop check of `tools/selftest.py` then expects the I2S output silent
+instead of stopped.
 
 ## Flashing
 

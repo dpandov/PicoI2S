@@ -9,7 +9,8 @@
 // or, for the filtered dual-line formats (the oversampling filters and the
 // sinc compensation), against the window's S/PDIF samples run through the
 // transmitter's filter (selftest_i2s_expect.h).
-// Capture windows that overlap a format or clk_sys change are discarded.
+// Capture windows that overlap a format or clk_sys change, a volume ramp or
+// a source-switch fade are discarded.
 // The results of the last windows are served as USB strings STRID_SELFTEST
 // (S/PDIF) and STRID_SELFTEST_I2S, formats in selftest_report.h, read by
 // tools/selftest.py.

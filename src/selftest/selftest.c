@@ -14,6 +14,7 @@
 #include "hardware/structs/pads_bank0.h"
 
 #include "board_config.h"
+#include "app/audio_pipeline.h"
 #include "clock/audio_clock.h"
 #include "i2s/i2s_format.h"
 #include "i2s/i2s_tx.h"
@@ -64,6 +65,9 @@ _Static_assert(MAX_FRAMES * 128u <= SELFTEST_DECODE_MAX_CELLS, "window exceeds t
 // A window is discarded if the measured clk_sys is off the configured one
 // by more than this (per mille): a clock change outside audio_clock.
 #define CLK_TOLERANCE_PERMILLE 5u
+// A window is discarded if the attenuation changed this recently: a ramp
+// or fade is not bit-exact. Covers the window, the ring and the filters.
+#define RAMP_HOLD_MS    100u
 
 //--------------------------------------------------------------------+
 // I2S capture
@@ -464,6 +468,9 @@ typedef struct {
     // Snapshot at the window start.
     uint32_t g_tx, g_clk, rate, clk;
     uint8_t  bits;
+    // The S/PDIF line is on. Off while the output runs (PICOI2S_KEEP_CLOCKS
+    // idle), S/PDIF is reported stopped and the I2S output checked alone.
+    bool     line;
     bool     i2s_run, layout_ok, pattern, filtered;
     i2s_format_t fmt;
     i2s_filter_type_t filter;
@@ -523,13 +530,14 @@ static bool start_window(void) {
     w.g_tx = g_tx;
     w.g_clk = g_clk;
     w.rate = tx_rate_now();
+    w.line = spdif_tx_line_on();
     w.bits = spdif_tx_word_bits();
     w.clk = clock_get_hz(clk_sys);
     w.i2s_run = w.rate != 0 && i2s_tx_running();
     w.fmt = i2s_tx_format();
     w.filter = i2s_tx_filter();
     w.osr = i2s_tx_oversampling();
-    w.pattern = PATTERN_CHECK && w.rate != 0;
+    w.pattern = PATTERN_CHECK && w.line;
     selftest_i2s_report_output(&rep.i2s, filter_token(w.fmt, w.filter), w.i2s_run ? w.osr : 0u,
                                i2s_tx_late());
 
@@ -544,7 +552,7 @@ static bool start_window(void) {
         w.layout_ok = w.i2s_run && i2s_layout(&w.lay, w.fmt, dtx, w.osr);
         // A filtered dual-line output gets the reference check, with the
         // filter's oversampling matching the running output's.
-        w.filtered = w.layout_ok && i2s_format_is_dual(w.fmt) &&
+        w.filtered = w.layout_ok && w.line && i2s_format_is_dual(w.fmt) &&
                      selftest_i2s_expect_setup(&expect, w.filter, w.rate) &&
                      selftest_i2s_expect_osr(&expect) == w.osr;
         plan_window(p, w.rate, w.clk, w.layout_ok, &w.lay, w.osr, w.filtered,
@@ -598,10 +606,12 @@ static bool verify_window(void) {
     }
     __dmb();
     bool changed = spdif_tx_generation() != w.g_tx || audio_clock_generation() != w.g_clk ||
-                   tx_rate_now() != w.rate || spdif_tx_word_bits() != w.bits ||
+                   tx_rate_now() != w.rate || spdif_tx_line_on() != w.line ||
+                   spdif_tx_word_bits() != w.bits ||
                    clock_get_hz(clk_sys) != w.clk ||
                    (w.rate != 0 && i2s_tx_running()) != w.i2s_run ||
-                   i2s_tx_oversampling() != w.osr;
+                   i2s_tx_oversampling() != w.osr ||
+                   audio_pipeline_ramp_age_ms() < RAMP_HOLD_MS;
     uint64_t fc_k = (uint64_t)w.fc_hz * 1000u;
     if (fc_k < (uint64_t)w.clk * (1000u - CLK_TOLERANCE_PERMILLE) ||
         fc_k > (uint64_t)w.clk * (1000u + CLK_TOLERANCE_PERMILLE)) {
@@ -614,11 +624,11 @@ static bool verify_window(void) {
         return true;
     }
     if (w.spdif_result < 0) {
-        selftest_report_timeout(&rep.spdif, w.rate, w.bits);
+        selftest_report_timeout(&rep.spdif, w.line ? w.rate : 0u, w.bits);
         w.phase = PH_SPDIF_DONE;
         return true;
     }
-    if (!w.rate || spdif_channel_status_build(cs, w.rate, w.bits) != 0) {
+    if (!w.line || spdif_channel_status_build(cs, w.rate, w.bits) != 0) {
         memset(cs, 0, sizeof(cs));
     }
     bool keep_frames = w.plan.compare && w.i2s_result > 0;
@@ -632,8 +642,8 @@ static bool verify_window(void) {
 // The S/PDIF report is in; decides the I2S path.
 static void spdif_done(void) {
     if (w.spdif_result >= 0) {
-        selftest_report_window(&rep.spdif, &spdif_res, w.rate, w.bits, w.pattern, w.fc_hz,
-                               w.plan.div ? w.plan.div : IDLE_DIV);
+        selftest_report_window(&rep.spdif, &spdif_res, w.line ? w.rate : 0u, w.bits, w.pattern,
+                               w.fc_hz, w.plan.div ? w.plan.div : IDLE_DIV);
     }
     if (!w.rate) {
         uint8_t lvl = i2s_pin_levels();

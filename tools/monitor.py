@@ -119,7 +119,8 @@ def config_lines(cfg):
     fmt, flt = cfg.get("format", "?"), cfg.get("filter", "?")
     lines = [
         f"board {BOARDS.get(cfg.get('board'), cfg.get('board'))}, firmware {fw}, "
-        f"{BUILDS.get(cfg.get('build'), cfg.get('build'))}",
+        f"{BUILDS.get(cfg.get('build'), cfg.get('build'))}"
+        f"{', DAC clocks kept running' if cfg.get('clocks') == 'keep' else ''}",
         f"USB {cfg.get('mode', '?').upper()} (mode jumper GP5 {'grounded' if mode_j == '1' else 'open'})",
         f"output format {FORMATS.get(fmt, fmt)} (jumpers GP8 GP7 GP6 = {fmt_j})",
     ]

@@ -32,7 +32,8 @@ Requirements that drive every change:
 - When audio stops (stream closed or no samples arriving), send S/PDIF
   silence for 3 s, then stop every output (lines low, no carrier); restart
   on the next stream. Digital silence inside an open stream is still
-  audio.
+  audio. The `PICOI2S_KEEP_CLOCKS` build keeps the DAC clocks running
+  with silence instead; S/PDIF still stops.
 - clk_sys is switched per rate so every PIO divider is an integer; the
   UART stays on the 48 MHz USB PLL.
 - LED: on while audio plays, two short flashes on enumeration, no other
@@ -57,7 +58,7 @@ Jumpers have pull-ups, are read once at boot, grounded = 1.
   `git submodule update --init`.
 - `PICO_BOARD=pico2` for both boards; the wiring is `PICOI2S_BOARD`
   (`rp2350-one`, default, or `pico2`). Build options: `PICOI2S_SELFTEST`,
-  `PICOI2S_TEST_TONE`, `PICOI2S_RJ24`.
+  `PICOI2S_TEST_TONE`, `PICOI2S_RJ24`, `PICOI2S_KEEP_CLOCKS`.
 - Build: `cmake -S . -B build -G Ninja -DPICO_BOARD=pico2 && cmake --build build`
   (`build/` belongs to the VS Code extension; Claude's builds go in
   `scratch/`). Outside the VS Code terminal, in Git Bash:
@@ -143,6 +144,7 @@ generated analysis go in `scratch/` at the repository root. This folder and
 | I2S / dual-line output, five filters, MCLK, DEM | done; AD1865 in dual18 played on real hardware |
 | Format map with the PCM56 mode, LATCH timing | done; board sweeps of every format, AD1865 listening test, scope check |
 | Trim pacer, I2S alignment loop, OUT re-arm | done |
+| Source-switch fades, keep-clocks build option | done; input harness, self-test in UAC1 and UAC2, 5.5-h soak |
 | S/PDIF input, arbitration, de-emphasis | done; Toslink with a real source and in an optical loop |
 
 Pending:
@@ -155,9 +157,8 @@ Pending:
   format with the input, the Pico 2 LOCK / EMPH LEDs, and as public
   features a self-test loopback (S/PDIF out to an input pin) and a
   self-test transmitter with the emphasis flag.
-- Ideas: a keep-clocks-running option for DACs that dislike clock loss;
-  a faster unlock on a gapless input rate change; keeping the USB audio
-  that arrives during the take-back fade. Known limitations are listed in `DESIGN.md`.
+- Ideas: a faster unlock on a gapless input rate change. Known
+  limitations are listed in `DESIGN.md`.
 
 ## Known TinyUSB issues (0.21.0)
 

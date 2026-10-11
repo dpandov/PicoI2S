@@ -58,7 +58,9 @@ sinc at the sample rate) are checked bit-exact against the window's own
 S/PDIF samples run through the transmitter's filter on the device, so no
 host-side model is involved. The sweep prints the filter token (sharp8,
 slow4, sinc, nos, - ...) in the I2S column. The stop test expects the I2S
-output silent, then stopped with all pins low. The soak logs every I2S
+output silent, then stopped with all pins low; with a PICOI2S_KEEP_CLOCKS
+build (configuration string clocks=keep) it must still send silence at the
+last rate instead, while S/PDIF stops as usual. The soak logs every I2S
 failure and counter increase as an event.
 
 The device has a volume control that Windows applies even in exclusive
@@ -134,7 +136,7 @@ try:
 except ImportError:
     sys.exit("missing Python packages: pip install -r tools/requirements.txt")
 
-from diag import STRID_DIAG, read_diag
+from diag import STRID_CONFIG, STRID_DIAG, parse_config, read_diag
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
@@ -470,6 +472,10 @@ class Reader:
             print(f"    {tag:>8} {st_raw}  || {i2_raw}  || {dg_raw.partition(' | ')[2]}")
         return parse_diag(dg_raw), parse_report(st_raw), parse_i2s_report(i2_raw), st_raw
 
+    def config(self):
+        """Configuration string fields ({} if unreadable)."""
+        return parse_config(read_diag(self.backend, STRID_CONFIG)) or {}
+
 
 def ppm(fs, rate):
     return (fs - rate) * 1e6 / rate
@@ -639,19 +645,26 @@ def play_item(rd, exe, device, rate, bits, boots, i2s_fmt, i2s_filter=None):
     return fails, i2s_fails, reads[-1]
 
 
-def stop_test(rd, rate, boots):
-    """Right after the last stream closed: silence, then the outputs stop."""
+def silent_at(report, rate):
+    """A report window of digital silence on an output running at rate."""
+    return (report["state"] == "sil" and report.get("z") == report.get("f")
+            and report.get("tx", (0,))[0] == rate)
+
+
+def stop_test(rd, rate, boots, keep=False):
+    """Right after the last stream closed: silence, then the outputs stop
+    (keep: S/PDIF stops, the I2S output keeps sending silence)."""
     t0 = time.time()
     fails = []
     wait_until(t0, STOP_SILENCE_AT)
     dg1, st1, i21, raw1 = rd.read(f"+{STOP_SILENCE_AT:.1f}s")
     if st1 is None:
         return ["no self-test report"], None, raw1
-    if st1["state"] != "sil" or st1.get("z") != st1.get("f") or st1.get("tx", (0,))[0] != rate:
+    if not silent_at(st1, rate):
         fails.append(f"+{STOP_SILENCE_AT}s: expected silence at {rate} Hz: {raw1}")
     if i21 is None:
         fails.append(f"+{STOP_SILENCE_AT}s: no I2S self-test report")
-    elif i21["state"] != "sil" or i21.get("z") != i21.get("f") or i21.get("tx", (0,))[0] != rate:
+    elif not silent_at(i21, rate):
         fails.append(f"+{STOP_SILENCE_AT}s: expected I2S silence at {rate} Hz: {i21['raw']}")
     if dg1 and dg1["fields"].get("led", 0) != 0:
         fails.append(f"+{STOP_SILENCE_AT}s: LED still on")
@@ -669,6 +682,10 @@ def stop_test(rd, rate, boots):
         fails.append(f"+{STOP_DONE_AT}s: expected output stopped, line low: {raw2}")
     if i22 is None:
         fails.append(f"+{STOP_DONE_AT}s: no I2S self-test report")
+    elif keep:
+        if not silent_at(i22, rate):
+            fails.append(f"+{STOP_DONE_AT}s: expected I2S silence at {rate} Hz (clocks kept): "
+                         f"{i22['raw']}")
     elif i22["state"] != "idle" or i22.get("lvl") != 0 or i22.get("tx") != (0, 0):
         fails.append(f"+{STOP_DONE_AT}s: expected I2S output stopped, pins low: {i22['raw']}")
     if st2["seq"] == st1["seq"]:
@@ -683,7 +700,7 @@ def stop_test(rd, rate, boots):
     return fails, stopped_at, raw2
 
 
-def run_sweep(rd, exe, args, boots, uac1, i2s_fmt, i2s_filter=None):
+def run_sweep(rd, exe, args, boots, uac1, i2s_fmt, i2s_filter=None, keep=False):
     sweep = SWEEP_UAC1 if uac1 else SWEEP
     if args.only:
         rate, bits = (int(x) for x in args.only.split("/"))
@@ -703,8 +720,10 @@ def run_sweep(rd, exe, args, boots, uac1, i2s_fmt, i2s_filter=None):
 
     if not args.no_stop:
         rate = sweep[-1][0]
-        fails, stopped_at, raw = stop_test(rd, rate, boots)
+        fails, stopped_at, raw = stop_test(rd, rate, boots, keep)
         when = f"stopped after {stopped_at:.1f} s" if stopped_at is not None else "no stop seen"
+        if keep:
+            when = f"S/PDIF {when}, I2S clocks kept"
         results.append(("3-s stop", fails, [], float("nan"), ""))
         print(f"3-s stop: {'PASS' if not fails else 'FAIL'}  ({when})  {raw}")
         for reason in fails:
@@ -874,6 +893,7 @@ def main():
         sys.exit("no I2S self-test report: flash a build with -DPICOI2S_SELFTEST=ON")
     boots = dg["boots"]
     uac1 = dg["uac1"]
+    keep = rd.config().get("clocks") == "keep"
     i2s_fmt = args.i2s_format or i2["fmt"]
     i2s_filter = args.i2s_filter or i2.get("filter")
     if i2s_filter == "-":
@@ -882,7 +902,8 @@ def main():
     print(f"report: {raw}")
     print(f"i2s:    {i2['raw']}")
     print(f"mode:   {'UAC1 (adaptive, 16 bit, up to 48 kHz)' if uac1 else 'UAC2'}, "
-          f"I2S format {i2s_fmt}, filter {i2.get('flt', '?')}")
+          f"I2S format {i2s_fmt}, filter {i2.get('flt', '?')}"
+          f"{', I2S clocks kept' if keep else ''}")
     if args.bits is None:
         args.bits = 16 if uac1 else 24
     formats = [(args.rate, args.bits)] if args.soak else []
@@ -910,7 +931,7 @@ def main():
     if args.soak:
         ok = run_soak(rd, exe, args, boots, i2s_fmt, i2s_filter)
     else:
-        ok = run_sweep(rd, exe, args, boots, uac1, i2s_fmt, i2s_filter)
+        ok = run_sweep(rd, exe, args, boots, uac1, i2s_fmt, i2s_filter, keep)
     sys.exit(0 if ok else 1)
 
 
