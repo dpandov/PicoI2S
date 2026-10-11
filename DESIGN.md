@@ -350,7 +350,11 @@ the wrong pattern wrap; the locate key skips silent and clipped frames.
   status, hunts the rate (5 ms per divider), measures it against the
   timer (lock after a clean 16 ms window within +-1200 ppm, re-check every
   16 ms at +-1500 ppm) and drops the lock after 2 ms without words or
-  8 bad subframes. A subframe is used only after 8 good ones and with its
+  8 bad subframes. A decoder set for 44.1 kHz also decodes 48 kHz (and the
+  other way round), so a rate change without a signal gap shows up only
+  in the rate: a second re-check every 2 ms at +-3 % unlocks within about
+  4 ms, before the new-rate frames leave the pipeline's 6 ms FIFO, which
+  the unlock flushes. A subframe is used only after 8 good ones and with its
   frame and the next one good. Frames 0..5 of each block wait for the
   channel-status bits, so non-PCM (played as zeros) and emphasis apply to
   exactly their block. FIFO of 2048 frames; every discontinuity flushes it
@@ -383,7 +387,9 @@ the wrong pattern wrap; the locate key skips silent and clipped frames.
   bit-perfect).
 - The S/PDIF output re-transmits the input bit-exact and reclocked at
   0 dB (word length 16 or 24 from the channel status), with the emphasis
-  flag copied (one flag byte per ring frame).
+  flag copied (one flag byte per ring frame). A block of silence (the ring
+  drained: the input stopped or stalled) carries no flag, so the 3-s
+  silence tail is not flagged and the DAC's de-emphasis switches off.
 - De-emphasis (every I2S / dual-line format): one biquad per rate
   (`i2s_deemph.h`, `tools/i2s_deemph_design.py`), minimax fit to the
   50/15 us curve (0.0037 / 0.0013 dB to 20 kHz at 44.1 / 48 kHz), DF1 Q30,
@@ -495,6 +501,14 @@ MCLK meter.
   ends); a real Eversolo source on Toslink (44.1 / 48 / 96 kHz, rate
   changes relock within a second, zero errors, its clock -102 ppm); the
   board's own Toslink output looped into its input.
+- Gapless input rate changes (2026-10-11, UAC2, the test transmitter's
+  divider switched live, 20 switches per pair): 44.1 <-> 48 kHz unlocks
+  after 0.4..4.0 ms with no new-rate frame played at the old rate (before
+  the 2 ms re-check: 4..13 ms and up to 198 frames, 4 ms); 88.2 <-> 96 kHz
+  0.6..7.0 ms, none played (before: up to 526 frames). Steady input at
+  5 rates x -1000 / 0 / +1000 ppm, 60 s each: no unlock, receiver error
+  or bad window. Emphasis: the 3-s silence tail after the input stops
+  carries no flag (before: every tail window flagged).
 - Soaks, all with zero events (no underrun, overrun, late interrupt or
   late filter block):
 
@@ -521,15 +535,5 @@ MCLK meter.
 
 ## Known limitations
 
-- A rate change without a signal gap on the input (44.1 <-> 48) plays a
-  few ms of new-rate frames at the old rate before the 16 ms re-check
-  unlocks, and counts a few hundred receiver errors.
-- The take-back from the input drops the USB audio that arrives while the
-  input fades out and plays out (1440 frames, 30 ms at 48 kHz): the USB
-  FIFO cannot hold it at every rate.
-- The silence tail after an emphasized input keeps the emphasis flag.
-- With the output looped into an input and a USB stream open but silent,
-  the output cycles every 3 s (the input takes it, which stops its own
-  source). A test setup only.
 - The trimmed modes carry the pacer's phase error on the I2S clocks (see
   the trim pacer).

@@ -157,8 +157,7 @@ Pending:
   format with the input, the Pico 2 LOCK / EMPH LEDs, and as public
   features a self-test loopback (S/PDIF out to an input pin) and a
   self-test transmitter with the emphasis flag.
-- Ideas: a faster unlock on a gapless input rate change. Known
-  limitations are listed in `DESIGN.md`.
+- Known limitations are listed in `DESIGN.md`.
 
 ## Known TinyUSB issues (0.21.0)
 

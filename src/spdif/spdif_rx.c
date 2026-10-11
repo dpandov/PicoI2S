@@ -49,11 +49,15 @@ _Static_assert(4u * RING_WORDS == 1u << RING_BITS, "ring size");
 #define CLASSIFY_TOL_PPM 40000u   // the supported rates are 8.8 % or more apart
 #define LOCK_US          16000u   // lock measurement window
 #define LOCK_TOL_PPM     1200u    // level II (1000 ppm) plus the measurement error
-// Rate re-check while locked. A decoder set for 44.1 kHz also decodes
+// Rate re-checks while locked. A decoder set for 44.1 kHz also decodes
 // 48 kHz (and the other way round), so a rate change without a signal gap
-// shows up only here.
-#define CHECK_US         16000u
-#define CHECK_TOL_PPM    1500u
+// shows up only here. The fast check catches it within about 4 ms, before
+// the new-rate frames leave the FIFO (6 ms in the pipeline); the slow one
+// checks the tolerance.
+#define FAST_CHECK_US      2000u
+#define FAST_CHECK_TOL_PPM 30000u  // the supported rates are 8.8 % or more apart
+#define CHECK_US           16000u
+#define CHECK_TOL_PPM      1500u
 
 #define NOSIG_US         2000u    // no words: restart the decoder, hold the lock
 #define HOLD_US          4000u    // lock held while the decoder resynchronises
@@ -85,6 +89,7 @@ typedef struct {
     uint64_t  hold_until;
     uint64_t  t_words;          // last time words arrived in sync
     uint64_t  m_us, m_words;    // measurement window start
+    uint64_t  c_us, c_words;    // LOCKED: fast check window start
     uint64_t  l_us, l_words;    // long window, since lock or resync
     uint32_t  err_mark;         // parser errors at ACQUIRE start
     uint32_t  seen_parity, seen_frame, seen_slips;
@@ -412,8 +417,8 @@ static void step_acquire(rx_input_t *in, uint64_t now) {
         in->ppm = ppm;
         in->l_us = in->m_us;
         in->l_words = in->m_words;
-        in->m_us = us;
-        in->m_words = words;
+        in->c_us = in->m_us = us;
+        in->c_words = in->m_words = words;
         in->t_words = now;
         p->cs_complete = false;
         stats.locks++;
@@ -428,8 +433,8 @@ static void step_locked(rx_input_t *in, uint64_t now) {
             if (stamp(in, &us, &words)) {
                 in->holding = false;
                 in->t_words = now;
-                in->l_us = in->m_us = us;
-                in->l_words = in->m_words = words;
+                in->l_us = in->m_us = in->c_us = us;
+                in->l_words = in->m_words = in->c_words = words;
             }
         } else if ((int64_t)(now - in->hold_until) > 0) {
             unlock(in, now);
@@ -442,14 +447,20 @@ static void step_locked(rx_input_t *in, uint64_t now) {
         lose_sync(in, now, HOLD_US);
         return;
     }
-    if (now - in->m_us < CHECK_US)
+    if (now - in->c_us < FAST_CHECK_US)
         return;
     uint64_t us, words;
     if (!stamp(in, &us, &words))
         return;
     uint32_t rate = spdif_rx_rates[in->rate_idx];
+    int32_t fast = spdif_rx_rate_ppm(words - in->c_words, us - in->c_us, rate);
+    in->c_us = us;
+    in->c_words = words;
+    bool fast_ok = fast <= (int32_t)FAST_CHECK_TOL_PPM && fast >= -(int32_t)FAST_CHECK_TOL_PPM;
+    if (fast_ok && us - in->m_us < CHECK_US)
+        return;
     int32_t ppm = spdif_rx_rate_ppm(words - in->m_words, us - in->m_us, rate);
-    if (ppm > (int32_t)CHECK_TOL_PPM || ppm < -(int32_t)CHECK_TOL_PPM) {
+    if (!fast_ok || ppm > (int32_t)CHECK_TOL_PPM || ppm < -(int32_t)CHECK_TOL_PPM) {
         unlock(in, now);        // rate change: measured again from the hunt
         restart_decoder(in, now);
         return;

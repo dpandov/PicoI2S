@@ -138,10 +138,8 @@ static uint32_t __not_in_flash_func(ring_source)(int32_t *pcm, uint32_t n_frames
         pcm[2u * i + 1u] = ring[k + 1u];
     }
     // The block takes the flags of its middle frame (a chunk with other
-    // flags may start inside it); silence keeps the last.
-    if (n > 0) {
-        ring_out_flags = ring_flags[(rd + n / 2u) & RING_MASK];
-    }
+    // flags may start inside it); a block of silence has none.
+    ring_out_flags = n > 0 ? ring_flags[(rd + n / 2u) & RING_MASK] : 0u;
     ring_rd = rd + n;
     if (n < n_frames) {
         // volatile: stops the compiler from turning this into a memset call,
