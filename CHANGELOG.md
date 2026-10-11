@@ -8,10 +8,12 @@ device release; every build also carries a build number and commit
 
 ## [Unreleased]
 
-## [1.04] - not yet tagged
+## [1.04] - 2026-10-11
 
-The state before the first public release; development builds only,
-under the pid.codes test USB IDs 1209:0001 / 1209:0002.
+The first public release, still under the pid.codes test USB IDs
+1209:0001 / 1209:0002 until dedicated IDs are assigned. Since 1.0: the
+I2S and dual-line outputs with their filters, MCLK and the DEM clock, the
+S/PDIF input, the keep-clocks option, version reporting.
 
 ### USB audio
 - USB Audio Class 2.0, asynchronous with a feedback endpoint: 32 / 44.1 /

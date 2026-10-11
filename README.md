@@ -1,5 +1,7 @@
 # PicoI2S
 
+![PicoI2S prototype: a Waveshare RP2350-One on perfboard with a Toslink module, the seven mode / format / filter jumpers and the output header](docs/images/picoi2s-board.jpeg)
+
 USB to I2S audio interface firmware for the RP2350 (Raspberry Pi Pico 2
 and clones) that feeds a DAC:
 
