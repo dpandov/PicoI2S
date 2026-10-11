@@ -743,6 +743,12 @@ Known limitations:
   driver (MS OS 2.0 descriptors need 8.1 or later) and shows up as an
   unknown device; audio is not affected.
 
+## Contributing
+
+Bug reports, measurements with other DACs and hosts, and pull requests
+are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md). Changes per release
+are in [CHANGELOG.md](CHANGELOG.md).
+
 ## License
 
 MIT. See `LICENSE`. Copy it, modify it, build on it, sell it, no permission

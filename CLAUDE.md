@@ -134,7 +134,9 @@ generated analysis go in `scratch/` at the repository root. This folder and
 - Keep the docs current with the code: `README.md` for users,
   `DESIGN.md` for design, measurements and the verification record,
   `tools/README.md` whenever a tool changes, this file for rules and
-  status.
+  status, and an entry under "Unreleased" in `CHANGELOG.md` for every
+  user-visible change. `CONTRIBUTING.md` restates the rules for outside
+  contributors; keep it in step.
 - Commit messages: short imperative subject, body explaining why.
 
 ## Status
@@ -209,6 +211,12 @@ Pending:
   Desktop.
 
 ## Git rules
+
+- Branches: `main` holds releases only (merge commits from `develop`,
+  tagged `vx.yy`, never squashed so build numbers stay comparable);
+  `develop` integrates; work goes on `feature/<topic>` / `fix/<topic>`
+  from `develop`. No CI: release files are built from the tag and
+  attached to the GitHub release by hand.
 
 - Do not add "Co-Authored-By" or any other Claude / AI attribution lines to
   commit messages or pull request descriptions in this repository.
