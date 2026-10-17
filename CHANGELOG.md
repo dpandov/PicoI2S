@@ -8,6 +8,11 @@ device release; every build also carries a build number and commit
 
 ## [Unreleased]
 
+### USB
+- Both USB modes share one USB ID; UAC1 mode reports a different device
+  release number, so hosts re-read the device after a mode change.
+  `picotool load --pid` is the same in both.
+
 ## [1.04] - 2026-10-11
 
 The first public release, still under the pid.codes test USB IDs

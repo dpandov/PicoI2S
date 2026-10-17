@@ -89,8 +89,14 @@ tools); `CLAUDE.md` holds the working rules and the current status.
 ## UAC1 mode
 
 - Selected by GP5 grounded at boot (read before `tusb_init()`, no switch
-  at runtime), own PID 0x0002 because Windows caches the driver binding
-  per VID / PID. PCM2704-like: device class 0 without IAD, one 16-bit
+  at runtime). Same PID and serial as UAC2, bcdDevice + 0x1000: Windows
+  caches descriptors per VID / PID / bcdDevice, so the changed release
+  number makes it re-read them, and it switches the same device instance
+  between `usbaudio2` and `usbaudio` and between the two names (tested
+  both ways). A serial suffix for UAC1 also worked on Windows, but
+  picotool finds the boot device after its reboot by the app's serial,
+  which the boot ROM reports without the suffix. Until 1.04 UAC1 had its
+  own PID 0x0002. PCM2704-like: device class 0 without IAD, one 16-bit
   stereo alt setting, 32 / 44.1 / 48 kHz discrete, adaptive ISO OUT
   endpoint (0x09; see the TinyUSB notes), no feedback endpoint, rate by
   endpoint SET_CUR, 48 kHz until the host sets one (reset on every
@@ -488,6 +494,14 @@ MCLK meter.
   3-s stop re-checked. In UAC2: both builds' sweeps (S/PDIF off after
   3.3 s), scenarios A to D and 14 input cycles, no bad window (the fades
   counted as skipped).
+- One PID for both USB modes (2026-10-17, Windows 11, test PID 0x0001,
+  UAC1 with bcdDevice + 0x1000): three UAC2 -> UAC1 -> UAC2 round trips
+  by the mode jumper, each time the same device instance switched
+  between `usbaudio2` / "Pico USB to I2S" and `usbaudio` / "Pico I2S"
+  without errors, both self-test sweeps passed and the one-step picotool
+  reflash worked in both modes. A `-UAC1` serial suffix gave UAC1 an
+  instance of its own but broke picotool's reflash in UAC1 (it looks for
+  the boot device by the app's serial).
 - Scope (2026-10-10, d791007): dual18 at 44.1 and 48 kHz (8x), the
   input's trimmed clock, MCLK in I2S, the DEM clock in TDA1541A, the
   S/PDIF output and the 3-s stop all as calculated. At 44.1 kHz: BCLK

@@ -8,20 +8,25 @@
 // Device identity
 //--------------------------------------------------------------------+
 
-// pid.codes test VID/PIDs, for private testing only. Dedicated PIDs are
-// required for public release. UAC1 mode has its own PID because Windows
-// caches the driver binding per VID/PID.
+// pid.codes test VID/PID, for private testing only; a dedicated PID is
+// required for public release. Both modes share the PID and the serial
+// number (picotool finds the boot device by it after a reboot); UAC1 mode
+// differs in the bcdDevice, which makes Windows re-read the descriptors and
+// rebind the driver and name when the mode changes.
 #define USB_VID                 0x1209
 #define USB_PID                 0x0001
-#define USB_PID_UAC1            0x0002
 
-// The firmware version (CMakeLists.txt) in BCD, 1.04 = 0x0104. Bump the
-// version on every descriptor change: Windows caches descriptors per
-// VID/PID/bcdDevice.
-#define USB_BCD_DEVICE          (((PICOI2S_VERSION_MAJOR / 10) << 12) | \
-                                 ((PICOI2S_VERSION_MAJOR % 10) << 8) |  \
+// The firmware version (CMakeLists.txt) in BCD, 1.04 = 0x0104; UAC1 mode
+// adds 0x1000 (1.04 = 0x1104), so the major version must stay a single
+// digit. Bump the version on every descriptor change: Windows caches
+// descriptors per VID/PID/bcdDevice.
+#define USB_BCD_DEVICE          (((PICOI2S_VERSION_MAJOR % 10) << 8) |  \
                                  ((PICOI2S_VERSION_MINOR / 10) << 4) |  \
                                  (PICOI2S_VERSION_MINOR % 10))
+#define USB_BCD_DEVICE_UAC1     (0x1000 | USB_BCD_DEVICE)
+#if PICOI2S_VERSION_MAJOR > 9 || PICOI2S_VERSION_MINOR > 99
+#error "version major.minor must fit 0..9 . 0..99 (bcdDevice, UAC1 flag)"
+#endif
 
 #define USB_MANUFACTURER_STR    "PicoI2S"
 #define USB_PRODUCT_STR         "Pico USB to I2S"

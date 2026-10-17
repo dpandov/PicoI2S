@@ -16,7 +16,7 @@ Output fields:
     |           everything after the last "| " is the application status:
     D/I/S       link state: detached, idle, streaming
     a/o/1       UAC2 mode: host detected as Apple (3-byte 10.14 feedback) or
-                other; 1: UAC1 mode (mode pin GP5 grounded, PID 0x0002)
+                other; 1: UAC1 mode (mode pin GP5 grounded)
     rate/bits   current stream format
     ff<N>       receive FIFO level in bytes (depth 9312, held at 6 packets)
     ur<N>       underruns: output ring ran dry while playing
@@ -135,7 +135,10 @@ import usb.core
 import usb.util
 
 VID = 0x1209
-PIDS = {0x0001: "UAC2", 0x0002: "UAC1"}
+# Both USB modes share the PID; firmware 1.04 and earlier used a second one
+# in UAC1 mode.
+PID = 0x0001
+PIDS = (PID, 0x0002)
 STRID_DIAG = 0x20
 STRID_SESSION = 0x23
 STRID_CONFIG = 0x24

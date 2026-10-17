@@ -69,7 +69,7 @@ Jumpers have pull-ups, are read once at boot, grounded = 1.
   `scratch/`). Outside the VS Code terminal, in Git Bash:
   `P=~/.pico-sdk; export PICO_SDK_PATH=$P/sdk/<ver> PICO_TOOLCHAIN_PATH=$P/toolchain/<ver> PATH=$P/toolchain/<ver>/bin:$P/picotool/<ver>/picotool:$P/cmake/<ver>/bin:$P/ninja/<ver>:$PATH`
 - Flash without BOOTSEL (the firmware has the picotool reset interface):
-  `picotool load -x <uf2> -f --vid 0x1209 --pid 0x0001` (UAC1: 0x0002).
+  `picotool load -x <uf2> -f --vid 0x1209 --pid 0x0001` (both modes).
   BOOTSEL is needed only after a hang with the watchdog off or after
   other code.
 - No debug probe or UART adapter is connected: use the diagnostic string

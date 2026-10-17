@@ -35,8 +35,8 @@ Python installation. What each tool needs:
 The USB tools read hidden string descriptors through the firmware's picotool
 reset interface, which Windows binds to WinUSB automatically (Windows 8.1
 or later); no audio driver is involved. They find the device in both modes
-(UAC2 PID 0x0001, UAC1 PID 0x0002) and detect the mode from the
-diagnostic string. Run the Windows test tools in a local session: over
+(both use PID 0x0001; firmware 1.04 and earlier used 0x0002 in UAC1 mode)
+and detect the mode from the diagnostic string. Run the Windows test tools in a local session: over
 Remote Desktop, Windows redirects audio and the device's playback endpoint
 is not available.
 

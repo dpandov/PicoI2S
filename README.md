@@ -499,8 +499,10 @@ drive USB Audio Class 1.0 devices, typically the PCM2704-style USB DACs.
 With GP5 grounded at power-up PicoI2S presents itself like one of those:
 
 - USB Audio Class 1.0, no interface association (a plain composite
-  device), its own USB ID 1209:0002 and the name "Pico I2S" (UAC2:
-  "Pico USB to I2S"). Windows binds its built-in `usbaudio.sys`.
+  device) and the name "Pico I2S" (UAC2: "Pico USB to I2S"), under the
+  same USB ID with a different device release number, so a host re-reads
+  the device after a mode change. Windows binds its built-in
+  `usbaudio.sys`.
 - One streaming format: 16-bit stereo at 32, 44.1 or 48 kHz, set by the
   host through the endpoint's sampling-frequency control. A host that never
   sets the rate gets 48 kHz.
@@ -515,8 +517,7 @@ With GP5 grounded at power-up PicoI2S presents itself like one of those:
   about 1 ppm of the host's. The trim range is +-1500 ppm,
   which leaves at least +-1100 ppm for the host's clock offset after the
   PLL error is cancelled.
-- The picotool reset interface and the diagnostic strings work as in UAC2
-  (`--pid 0x0002` for picotool).
+- The picotool reset interface and the diagnostic strings work as in UAC2.
 
 Limits compared with UAC2: 16 bit only, 48 kHz maximum, and the S/PDIF
 clock carries the host's clock quality (drift, and a small dither of the
@@ -611,7 +612,8 @@ reflashed without touching the button:
 picotool load -x build/PicoI2S.uf2 -f --vid 0x1209 --pid 0x0001
 ```
 
-In UAC1 mode use `--pid 0x0002`.
+The same command works in both USB modes (firmware 1.04 and earlier used
+`--pid 0x0002` in UAC1 mode).
 
 ## Testing on Windows
 
@@ -746,8 +748,8 @@ Known limitations:
 - In UAC2 mode the 44.1 and 48 kHz settings run the RP2350 at 152.4 /
   153.6 MHz, 1.6 / 2.4 % above its 150 MHz rating (see
   [Clocks and accuracy](#clocks-and-accuracy)).
-- The USB IDs 1209:0001 (UAC2) and 1209:0002 (UAC1) are pid.codes test
-  IDs. Dedicated PIDs are needed before public release.
+- The USB ID 1209:0001 is a pid.codes test ID; a dedicated PID
+  (1209:2351) is requested.
 - In UAC1 mode on Windows before 8.1 the picotool reset interface has no
   driver (MS OS 2.0 descriptors need 8.1 or later) and shows up as an
   unknown device; audio is not affected.

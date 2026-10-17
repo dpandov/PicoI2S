@@ -82,8 +82,8 @@ static tusb_desc_device_t const desc_device_uac1 = {
     .bMaxPacketSize0    = CFG_TUD_ENDPOINT0_SIZE,
 
     .idVendor           = USB_VID,
-    .idProduct          = USB_PID_UAC1,
-    .bcdDevice          = USB_BCD_DEVICE,
+    .idProduct          = USB_PID,
+    .bcdDevice          = USB_BCD_DEVICE_UAC1,
 
     .iManufacturer      = STRID_MANUFACTURER,
     .iProduct           = STRID_PRODUCT,
